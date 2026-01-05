@@ -1,0 +1,10 @@
+namespace EmailServer.Config;
+
+table Config {
+  tld:string;
+  hostname:string;
+  users:[string];
+  blocked:[string];
+}
+
+root_type Config;

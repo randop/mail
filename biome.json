@@ -1,0 +1,20 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.3.10/schema.json",
+	"files": {
+		"ignoreUnknown": true,
+		"includes": [
+			"**",
+			"!**/.git/**",
+			"!**/legacy/**",
+			"!**/dist/**",
+			"!**/.dist/**",
+			"!**/build/**",
+			"!**/node_modules/**",
+			"!**/*.min.js",
+			"!**/coverage/**",
+			"!**/*.sh",
+			"!**/*.md",
+			"!**/bun.lock"
+		]
+	}
+}
