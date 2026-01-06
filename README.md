@@ -33,7 +33,7 @@ bun build ./src/index.ts --outdir ./.dist --target=node --format=esm
 openssl req -x509 -newkey rsa:4096 \
   -keyout key.pem -out cert.pem \
   -sha256 -days 3650 -nodes \
-  -subj "/C=XX/ST=StateName/L=CityName/O=CompanyName/OU=CompanySectionName/CN=CommonNameOrHostname"
+  -subj "/C=PH/ST=State/L=City/O=Company/OU=Team/CN=localhost"
 ```
 
 #### Setup flatbuffers toolkit

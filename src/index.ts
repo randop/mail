@@ -42,6 +42,16 @@ if (useDirectLocalhost) {
   useProxy = false;
 }
 
+const emailAccounts = new Set<string>();
+const accountsFile = readFileSync("/etc/mail/accounts.whitelist", "utf-8");
+const accountsParsed = accountsFile.split(/\r?\n/);
+for (const line of accountsParsed) {
+  const account = line.trim();
+  if (account.length > 0) {
+    emailAccounts.add(account);
+  }
+}
+
 const emailDirectory: string = "/emails/new/";
 const certFile: string = "/emails/certs/cert.pem";
 const sslKeyFile: string = "/emails/certs/key.pem";
