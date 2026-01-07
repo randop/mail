@@ -52,6 +52,16 @@ for (const line of accountsParsed) {
   }
 }
 
+const blockedAccounts = new Set<string>();
+const blockedFile = readFileSync("/etc/mail/accounts.blacklist", "utf-8");
+const blockedParsed = blockedFile.split(/\r?\n/);
+for (const line of blockedParsed) {
+  const blocked = line.trim();
+  if (blocked.length > 0) {
+    blockedAccounts.add(blocked);
+  }
+}
+
 const emailDirectory: string = "/emails/new/";
 const certFile: string = "/emails/certs/cert.pem";
 const sslKeyFile: string = "/emails/certs/key.pem";
