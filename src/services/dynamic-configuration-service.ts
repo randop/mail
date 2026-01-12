@@ -12,8 +12,8 @@ import { MyGame } from "./monster_generated"; // Adjust path if needed
 
 // Read the file as a UTF-8 string (assuming it contains a plain Base64-encoded string)
 const base64String: string = fs
-	.readFileSync("monster_base64.txt", "utf8")
-	.trim();
+  .readFileSync("monster_base64.txt", "utf8")
+  .trim();
 
 // Decode the Base64 string directly to Uint8Array (Buffer extends Uint8Array in Node.js)
 const data: Uint8Array = Buffer.from(base64String, "base64");

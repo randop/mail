@@ -1,57 +1,57 @@
 {
-	"compilerOptions": {
-		/* Target & Module – Match Bun build output */
-		"target": "ES2022",
-		"lib": ["ES2023"],
+  "compilerOptions": {
+    /* Target & Module – Match Bun build output */
+    "target": "ES2022",
+    "lib": ["ES2023"],
 
-		"module": "ESNext",
-		"moduleResolution": "bundler",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
 
-		/* Output Control – Important for Bun build */
-		"noEmit": false,
-		"outDir": "./dist",
-		"sourceMap": false,
-		"removeComments": false,
+    /* Output Control – Important for Bun build */
+    "noEmit": false,
+    "outDir": "./dist",
+    "sourceMap": false,
+    "removeComments": false,
 
-		/* Path Aliases – Critical: Bun build resolves them via tsconfig */
-		"baseUrl": "./src",
-		"paths": {
-			"@/*": ["*"]
-		},
+    /* Path Aliases – Critical: Bun build resolves them via tsconfig */
+    "baseUrl": "./src",
+    "paths": {
+      "@/*": ["*"]
+    },
 
-		/* Strict Type Safety */
-		"strict": true,
-		"noImplicitAny": true,
-		"strictNullChecks": true,
-		"strictFunctionTypes": true,
-		"strictBindCallApply": true,
-		"strictPropertyInitialization": true,
-		"noImplicitThis": true,
-		"alwaysStrict": true,
-		"noUnusedLocals": true,
-		"noUnusedParameters": true,
-		"noImplicitReturns": true,
-		"noFallthroughCasesInSwitch": true,
-		"noUncheckedIndexedAccess": true,
-		"noImplicitOverride": true,
+    /* Strict Type Safety */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
 
-		/* Modern TS Features & Bun Compatibility */
-		"skipLibCheck": true,
-		"isolatedModules": true,
-		"allowImportingTsExtensions": true,
-		"resolveJsonModule": true,
-		"esModuleInterop": true,
-		"allowSyntheticDefaultImports": true,
-		"forceConsistentCasingInFileNames": true,
+    /* Modern TS Features & Bun Compatibility */
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
 
-		/* Ensure clean ESM output */
-		"verbatimModuleSyntax": true,
+    /* Ensure clean ESM output */
+    "verbatimModuleSyntax": true,
 
-		/* Automatically includes all type declarations specified */
-		"typeRoots": ["./node_modules/@types", "./src/types"]
-	},
+    /* Automatically includes all type declarations specified */
+    "typeRoots": ["./node_modules/@types", "./src/types"]
+  },
 
-	"include": ["src/**/*", "src/types/**/*"],
+  "include": ["src/**/*", "src/types/**/*"],
 
-	"exclude": ["node_modules", "dist", ".dist", ".git"]
+  "exclude": ["node_modules", "dist", ".dist", ".git"]
 }

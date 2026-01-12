@@ -1,28 +1,28 @@
 {
-	"name": "mail",
-	"module": "src/index.ts",
-	"type": "module",
-	"private": true,
-	"scripts": {
-		"start": "bun run src/index.ts",
-		"build": "bun build ./src/index.ts --outdir ./.dist --target=node --format=esm",
-		"fmt": "biome format --write"
-	},
-	"devDependencies": {
-		"@biomejs/biome": "2.3.10",
-		"@types/bun": "latest",
-		"@types/node": "^24.9.2"
-	},
-	"peerDependencies": {
-		"typescript": "^5.9.3"
-	},
-	"dependencies": {
-		"flatbuffers": "^25.9.23",
-		"is-valid-domain": "^0.1.6",
-		"redis": "^5.10.0",
-		"smtp-server": "^3.15.0",
-		"undici": "^7.16.0",
-		"uuid": "^13.0.0",
-		"zod": "^4.2.1"
-	}
+  "name": "mail",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "build": "bun build ./src/index.ts --outdir ./.dist --target=node --format=esm",
+    "fmt": "biome format --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.10",
+    "@types/bun": "latest",
+    "@types/node": "^24.9.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "flatbuffers": "^25.9.23",
+    "is-valid-domain": "^0.1.6",
+    "redis": "^5.10.0",
+    "smtp-server": "^3.15.0",
+    "undici": "^7.16.0",
+    "uuid": "^13.0.0",
+    "zod": "^4.2.1"
+  }
 }

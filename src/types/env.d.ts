@@ -1,15 +1,15 @@
 import "zod";
 
 declare global {
-	namespace NodeJS {
-		interface ProcessEnv {
-			NODE_ENV: "development" | "test" | "production";
+  namespace NodeJS {
+    interface ProcessEnv {
+      NODE_ENV: "development" | "test" | "production";
 
-			REDIS_URL: string;
+      REDIS_URL: string;
 
-			LOG_LEVEL?: "debug" | "info" | "warn" | "error";
-		}
-	}
+      LOG_LEVEL?: "debug" | "info" | "warn" | "error";
+    }
+  }
 }
 
 // Important: This line ensures the file is treated as a module-augmenting file
