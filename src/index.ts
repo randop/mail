@@ -10,6 +10,7 @@ import {
   SMTP_552_EXCEEDEDSTORAGEALLOCATION,
   SMTP_553_MAILBOXNAMENOTALLOWED,
   SMTP_554_TRANSACTIONFAILED,
+  SMTP_221_SERVICECLOSINGTRANSMISSIONCHANNEL,
 } from "./lib/response-codes";
 import type { SessionReputation } from "@/lib/reputation";
 import { ReputationStatus, ReputationDecision } from "@/lib/reputation";
@@ -112,6 +113,14 @@ const options: any = {
       return callback(new Error("Connections from localhost are forbidden"));
     }
     const theIP = session.remoteAddress;
+    if (blockedIPs.has(theIP)) {
+      log.error(`Blocked: ${theIP}`);
+      return callback(
+        Object.assign(new Error("Connection forbidden"), {
+          responseCode: SMTP_221_SERVICECLOSINGTRANSMISSIONCHANNEL,
+        }),
+      );
+    }
     let reputation: NullableString = await cache.get(`reputation_${theIP}`);
     if (reputation !== null && reputation == ReputationStatus.BANNED) {
       log.error(`Banned: ${theIP}`);
