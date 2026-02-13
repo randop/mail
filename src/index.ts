@@ -14,6 +14,7 @@ import {
 } from "./lib/response-codes";
 import type { SessionReputation } from "@/lib/reputation";
 import { ReputationStatus, ReputationDecision } from "@/lib/reputation";
+import FileSystemConfigurationService from "@/services/filesystem-configuration-service";
 
 import log from "@/helpers/log";
 
@@ -73,9 +74,13 @@ for (const line of blockedIpParsed) {
   }
 }
 
-const emailDirectory: string = "/emails/new/";
-const certFile: string = "/emails/certs/cert.pem";
-const sslKeyFile: string = "/emails/certs/key.pem";
+const configService = new FileSystemConfigurationService();
+const configuration = configService.load();
+log.info(configuration);
+
+const emailDirectory: string = configuration.directory;
+const certFile: string = configuration.certificateFile;
+const sslKeyFile: string = configuration.privateKeyFile;
 
 const options: any = {
   key: readFileSync(sslKeyFile),
