@@ -20,6 +20,10 @@ import log from "@/helpers/log";
 
 const EXIT_SUCCESS: number = 0;
 
+const configService = new FileSystemConfigurationService();
+const configuration = configService.load();
+log.info(configuration);
+
 const cache = new CacheService();
 await cache.connect();
 
@@ -73,10 +77,6 @@ for (const line of blockedIpParsed) {
     blockedIPs.add(blocked);
   }
 }
-
-const configService = new FileSystemConfigurationService();
-const configuration = configService.load();
-log.info(configuration);
 
 const emailDirectory: string = configuration.directory;
 const certFile: string = configuration.certificateFile;

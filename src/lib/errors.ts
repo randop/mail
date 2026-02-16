@@ -50,7 +50,7 @@ export const ErrorCodeToStatus: Record<AppErrorCodeType, number> = {
  * Extend this for domain-specific errors (ValidationError, NotFoundError, etc.)
  */
 export class AppError extends Error {
-  public readonly code: AppErrorCodeType; // short machine-readable code
+  public code: AppErrorCodeType; // short machine-readable code
   public readonly statusCode: number; // HTTP status if applicable
   public readonly details?: unknown; // extra context (object, array, etc.)
   public readonly isOperational: boolean; // true = safe to expose to client, false = internal
@@ -74,6 +74,10 @@ export class AppError extends Error {
 
     // Proper prototype chain for instanceof in extended classes
     Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  setErrorCode(code: AppErrorCodeType) {
+    this.code = code;
   }
 
   static badRequest(message: string, details?: unknown): AppError {
