@@ -21,6 +21,22 @@ export class FileSystemConfigurationService {
       return FailureResult(error);
     }
 
+    try {
+      readFileSync("/etc/mail/accounts.blacklist", "utf-8");
+    } catch (err: unknown) {
+      const error = toAppError(err);
+      error.code = AppErrorCode.VALIDATION_ERROR;
+      return FailureResult(error);
+    }
+
+    try {
+      readFileSync("/etc/mail/ips.blacklist", "utf-8");
+    } catch (err: unknown) {
+      const error = toAppError(err);
+      error.code = AppErrorCode.VALIDATION_ERROR;
+      return FailureResult(error);
+    }
+
     /** Check-test write on the email directory **/
     const fileUUID: string = "." + randomUUID() + ".check";
     const filePath = resolve(config.directory, fileUUID);
