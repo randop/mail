@@ -68,6 +68,45 @@ export class FileSystemConfigurationService {
     }
     return config;
   }
+
+  emailAccounts(): Set<string> {
+    const accounts = new Set<string>();
+    const accountsFile = readFileSync("/etc/mail/accounts.whitelist", "utf-8");
+    const accountsParsed = accountsFile.split(/\r?\n/);
+    for (const line of accountsParsed) {
+      const account = line.trim();
+      if (account.length > 0) {
+        accounts.add(account);
+      }
+    }
+    return accounts;
+  }
+
+  blacklistAccounts(): Set<string> {
+    const blockedAccounts = new Set<string>();
+    const blockedFile = readFileSync("/etc/mail/accounts.blacklist", "utf-8");
+    const blockedParsed = blockedFile.split(/\r?\n/);
+    for (const line of blockedParsed) {
+      const blocked = line.trim();
+      if (blocked.length > 0) {
+        blockedAccounts.add(blocked);
+      }
+    }
+    return blockedAccounts;
+  }
+
+  blacklistIps(): Set<string> {
+    const blockedIPs = new Set<string>();
+    const blockedIpFile = readFileSync("/etc/mail/ips.blacklist", "utf-8");
+    const blockedIpParsed = blockedIpFile.split(/\r?\n/);
+    for (const line of blockedIpParsed) {
+      const blocked = line.trim();
+      if (blocked.length > 0) {
+        blockedIPs.add(blocked);
+      }
+    }
+    return blockedIPs;
+  }
 }
 
 export default FileSystemConfigurationService;

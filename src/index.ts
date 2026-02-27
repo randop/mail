@@ -22,7 +22,6 @@ const EXIT_SUCCESS: number = 0;
 
 const configService = new FileSystemConfigurationService();
 const configuration = configService.load();
-log.info(configuration);
 
 const cache = new CacheService();
 await cache.connect();
@@ -48,36 +47,9 @@ if (useDirectLocalhost) {
   useProxy = false;
 }
 
-const emailAccounts = new Set<string>();
-const accountsFile = readFileSync("/etc/mail/accounts.whitelist", "utf-8");
-const accountsParsed = accountsFile.split(/\r?\n/);
-for (const line of accountsParsed) {
-  const account = line.trim();
-  if (account.length > 0) {
-    emailAccounts.add(account);
-  }
-}
-
-const blockedAccounts = new Set<string>();
-const blockedFile = readFileSync("/etc/mail/accounts.blacklist", "utf-8");
-const blockedParsed = blockedFile.split(/\r?\n/);
-for (const line of blockedParsed) {
-  const blocked = line.trim();
-  if (blocked.length > 0) {
-    blockedAccounts.add(blocked);
-  }
-}
-
-const blockedIPs = new Set<string>();
-const blockedIpFile = readFileSync("/etc/mail/ips.blacklist", "utf-8");
-const blockedIpParsed = blockedIpFile.split(/\r?\n/);
-for (const line of blockedIpParsed) {
-  const blocked = line.trim();
-  if (blocked.length > 0) {
-    blockedIPs.add(blocked);
-  }
-}
-
+const emailAccounts = configService.emailAccounts();
+const blockedAccounts = configService.blacklistAccounts();
+const blockedIPs = configService.blacklistIps();
 const emailDirectory: string = configuration.directory;
 const certFile: string = configuration.certificateFile;
 const sslKeyFile: string = configuration.privateKeyFile;
