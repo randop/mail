@@ -1,5 +1,5 @@
 import { z } from "zod";
-const log = console;
+import log from "@/helpers/log";
 
 const envSchema = z.object({
   NODE_ENV: z

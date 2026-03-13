@@ -1,3 +1,5 @@
+import "@/boot";
+import log from "@/helpers/log";
 import CacheService from "@/services/cache-service";
 import type { NullableString, SessionHostCheckResult } from "@/lib/types";
 import { SMTPServer } from "smtp-server";
@@ -11,12 +13,10 @@ import {
   SMTP_553_MAILBOXNAMENOTALLOWED,
   SMTP_554_TRANSACTIONFAILED,
   SMTP_221_SERVICECLOSINGTRANSMISSIONCHANNEL,
-} from "./lib/response-codes";
+} from "@/lib/response-codes";
 import type { SessionReputation } from "@/lib/reputation";
 import { ReputationStatus, ReputationDecision } from "@/lib/reputation";
 import FileSystemConfigurationService from "@/services/filesystem-configuration-service";
-
-import log from "@/helpers/log";
 
 const EXIT_SUCCESS: number = 0;
 

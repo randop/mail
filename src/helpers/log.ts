@@ -6,6 +6,8 @@ interface Logger {
   info(...args: any[]): void;
   error(...args: any[]): void;
   warn(...args: any[]): void;
+  debug(...args: any[]): void;
+  trace(...args: any[]): void;
 }
 
 // Helper to format logging with timestamp [YYYY-MM-DD hh:mm:ss]
@@ -31,6 +33,12 @@ export const log: Logger = {
   },
   warn: (...args: any[]) => {
     console.warn(formatTimestamp(), "WARNING", ...args);
+  },
+  debug: (...args: any[]) => {
+    console.debug(formatTimestamp(), "DEBUG", ...args);
+  },
+  trace: (...args: any[]) => {
+    console.trace(formatTimestamp(), "TRACE", ...args);
   },
 };
 
