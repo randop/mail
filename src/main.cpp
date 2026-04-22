@@ -47,7 +47,9 @@ this software will be made available under the specified Change License.
 
 #include "stop_signal.hh"
 
+#include <arpa/inet.h>
 #include <chrono>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -232,6 +234,33 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
             inDataMode = true;
             co_await out.write(
                 "354 Start mail input; end with <CRLF>.<CRLF>\r\n");
+          } else if ((prefix.find("EHLO ") != std::string_view::npos) ||
+                     (prefix.find("HELO ") != std::string_view::npos)) {
+
+            co_await out.write("250-maildomain.ngo Nice to meet you, [");
+            char ipbuf[INET6_ADDRSTRLEN];
+            const char *res = nullptr;
+
+            const sockaddr &sa = remote.as_posix_sockaddr();
+
+            if (sa.sa_family == AF_INET) {
+              res = inet_ntop(
+                  AF_INET, &reinterpret_cast<const sockaddr_in &>(sa).sin_addr,
+                  ipbuf, sizeof(ipbuf));
+            } else {
+              res = inet_ntop(
+                  AF_INET6,
+                  &reinterpret_cast<const sockaddr_in6 &>(sa).sin6_addr, ipbuf,
+                  sizeof(ipbuf));
+            }
+
+            co_await out.write(ipbuf, std::strlen(ipbuf));
+            co_await out.write("]\r\n");
+            co_await out.write("250-8BITMIME\r\n");
+            co_await out.write("250-SMTPUTF8\r\n");
+            // Per the SMTP RFC standards: 512 KB × 1024 bytes/KB = 524,288
+            // bytes
+            co_await out.write("250 SIZE 524288\r\n");
           } else if (prefix.find("QUIT") != std::string_view::npos) {
             co_await out.write("221 Bye\r\n");
           } else {
