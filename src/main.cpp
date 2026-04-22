@@ -101,6 +101,9 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
 
   gate.enter();
 
+  co_await out.write("220 mail Service ready\r\n");
+  co_await out.flush();
+
   try {
     size_t offset = 0;
     while (active) {
@@ -113,6 +116,15 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
 
       co_await tmp_file.dma_write(offset, buf.get(), buf.size());
       offset += buf.size();
+
+      size_t pos;
+      seastar::sstring str(buf.get(), buf.size());
+      while ((pos = str.find("\r\n")) != seastar::sstring::npos) {
+        seastar::sstring line = str.substr(0, pos);
+        applog.info("line: {}", line);
+        co_await out.write("500 Syntax error\r\n");
+        co_await out.flush();
+      }
     }
     applog.info("Finished writing {} bytes to {} for client {}", offset,
                 client_filename, remote);
