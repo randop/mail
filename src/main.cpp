@@ -56,6 +56,97 @@ this software will be made available under the specified Change License.
 
 static seastar::logger applog("smtp-server");
 
+struct crlf_result {
+  // line segment exclusive of \r\n
+  std::string_view prefix;
+  bool found = false;
+  size_t bytes_consumed = 0;
+};
+
+struct data_delimeter_result {
+  bool found = false;
+  size_t bytes_consumed = 0;
+};
+
+data_delimeter_result find_data_delimeter(
+    const std::vector<seastar::temporary_buffer<char>> &chunks) noexcept {
+  if (chunks.empty()) {
+    return {};
+  }
+
+  constexpr std::string_view delim = "\r\n\r\n\r\n.\r\n";
+  constexpr size_t dlen = delim.size();
+
+  size_t chunk_offset = 0;
+  int state = 0;
+
+  for (const auto &buf : chunks) {
+    if (buf.empty())
+      continue;
+
+    const char *p = buf.get();
+    const char *const end = p + buf.size();
+
+    while (p < end) {
+      const char c = *p++;
+
+      if (c == delim[state]) {
+        ++state;
+        if (state == dlen) {
+          return {true, chunk_offset + (p - buf.get())};
+        }
+      } else {
+        state = (c == delim[0]) ? 1 : 0;
+      }
+    }
+
+    chunk_offset += buf.size();
+  }
+
+  return {false, chunk_offset};
+}
+
+crlf_result find_first_crlf(
+    const std::vector<seastar::temporary_buffer<char>> &chunks) noexcept {
+  if (chunks.empty()) {
+    return {};
+  }
+
+  size_t chunk_offset = 0;
+
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    const auto &buf = chunks[i];
+    if (buf.empty())
+      continue;
+
+    const char *data = buf.get();
+    const size_t len = buf.size();
+
+    for (size_t j = 0; j < len; ++j) {
+      if (data[j] == '\n') {
+        if (j > 0 && data[j - 1] == '\r') {
+          std::string_view prefix(data, j - 1);
+          return {prefix, true, chunk_offset + j + 1};
+        }
+      }
+    }
+
+    if (len > 0 && data[len - 1] == '\r') {
+      if (i + 1 < chunks.size()) {
+        const auto &next_buf = chunks[i + 1];
+        if (!next_buf.empty() && next_buf.get()[0] == '\n') {
+          std::string_view prefix(data, len - 1);
+          return {prefix, true, chunk_offset + len + 1};
+        }
+      }
+    }
+
+    chunk_offset += len;
+  }
+
+  return {{}, false, chunk_offset};
+}
+
 seastar::future<> handle_connection(seastar::connected_socket cs,
                                     seastar::socket_address remote,
                                     uint32_t timeout_seconds,
@@ -104,26 +195,54 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
   co_await out.write("220 mail Service ready\r\n");
   co_await out.flush();
 
+  std::vector<seastar::temporary_buffer<char>> chunks;
+  size_t offset = 0;
+  bool lineErr = false;
+  bool inDataMode = false;
+
   try {
-    size_t offset = 0;
     while (active) {
       auto buf = co_await in.read();
       if (buf.empty()) {
         break;
       }
+
+      lineErr = false;
       idle_timer.rearm(seastar::timer<>::clock::now() +
                        std::chrono::seconds(timeout_seconds));
 
+      chunks.push_back(buf.share());
       co_await tmp_file.dma_write(offset, buf.get(), buf.size());
       offset += buf.size();
 
-      size_t pos;
-      seastar::sstring str(buf.get(), buf.size());
-      while ((pos = str.find("\r\n")) != seastar::sstring::npos) {
-        seastar::sstring line = str.substr(0, pos);
-        applog.info("line: {}", line);
-        co_await out.write("500 Syntax error\r\n");
-        co_await out.flush();
+      if (inDataMode) {
+        // TODO: write maildir data
+        auto [found, consumed] = find_data_delimeter(chunks);
+        if (found) {
+          inDataMode = false;
+          chunks.clear();
+          co_await out.write("250 OK queued\r\n");
+          co_await out.flush();
+        }
+      } else {
+        auto [prefix, found, consumed] = find_first_crlf(chunks);
+        if (found) {
+          chunks.clear();
+          if (prefix.find("DATA") != std::string_view::npos) {
+            inDataMode = true;
+            co_await out.write(
+                "354 Start mail input; end with <CRLF>.<CRLF>\r\n");
+          } else if (prefix.find("QUIT") != std::string_view::npos) {
+            co_await out.write("221 Bye\r\n");
+          } else {
+            if (lineErr) {
+              co_await out.write("500 Syntax error\r\n");
+            } else {
+              co_await out.write("250 OK\r\n");
+            }
+          }
+          co_await out.flush();
+        }
       }
     }
     applog.info("Finished writing {} bytes to {} for client {}", offset,
@@ -170,9 +289,12 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
               port);
   seastar::timer<> timer;
   uint64_t connection_count = 0;
-  timer.set_callback([&connection_count, &timer] {
-    applog.info("Active connections on shard {}: {}", seastar::this_shard_id(),
-                connection_count);
+  bool stats = false;
+  timer.set_callback([&connection_count, &timer, &stats] {
+    if (stats) {
+      applog.info("Active connections on shard {}: {}",
+                  seastar::this_shard_id(), connection_count);
+    }
     timer.arm(std::chrono::seconds(30));
   });
   timer.arm(std::chrono::seconds(30));
