@@ -1,8 +1,8 @@
 #!/bin/sh
 
-swaks --to recipient@example.com \
-  --from sender@example.com \
-  --server 192.168.100.12:5255 \
-  --header "Subject: Test from swaks" \
+swaks --to recipient@maildomain.ngo \
+  --from sender@maildomain.ngo \
+  --server 127.0.0.1:5255 \
+  --header "Subject: Test Email" \
   --body "Test message body" \
   --no-suppress-data
