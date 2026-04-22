@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
 
+# Suppress Boost-related CMake warnings
+cmake_policy(SET CMP0144 NEW)
+cmake_policy(SET CMP0167 NEW)
+set(Boost_NO_WARN_NEW_VERSIONS ON)
+
 file(STRINGS "VERSION" PROJECT_VERSION_STRING LIMIT_COUNT 1)
 string(STRIP "${PROJECT_VERSION_STRING}" PROJECT_VERSION_STRING)
 
-project(myapp VERSION ${PROJECT_VERSION_STRING} LANGUAGES CXX)
+project(mail VERSION ${PROJECT_VERSION_STRING} LANGUAGES CXX)
 
 project(mail LANGUAGES CXX)
 
@@ -24,7 +29,7 @@ target_include_directories(smtp-server PRIVATE
 
 # TODO: Defer binary optimizations
 target_compile_options(smtp-server PRIVATE
-    -Wall -Wextra -O0
+    -Wall -Wextra
 )
 
 target_compile_definitions(smtp-server PRIVATE

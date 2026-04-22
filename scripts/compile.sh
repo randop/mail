@@ -15,7 +15,10 @@ export CMAKE_PREFIX_PATH="${OPT_PREFIX}/lksctp/current:${CMAKE_PREFIX_PATH}"
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/colm-suite/current:${CMAKE_PREFIX_PATH}"
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/valgrind/current:${CMAKE_PREFIX_PATH}"
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/yamlcpp/current:${CMAKE_PREFIX_PATH}"
-echo "CMAKE_PREFIX_PATH: $CMAKE_PREFIX_PATH"
+
+### ***verbose***
+# echo "CMAKE_PREFIX_PATH: $CMAKE_PREFIX_PATH"
+###
 
 LOCAL_LIBRARY_PATH=${HOME}/opt/boost/current/lib
 
@@ -27,8 +30,8 @@ fi
 
 clang-format -i src/main.cpp
 
-mkdir -p build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+mkdir -p .build
+cd .build
+cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
 make -j$(nproc)
