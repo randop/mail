@@ -79,15 +79,23 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
     active = false;
     idle_timer.cancel();
     applog.warn("aborting client {} ...", remote);
-    (void)in.close();
-    (void)out.close();
+    try {
+      cs.shutdown_input();
+      cs.shutdown_output();
+    } catch (...) {
+      // void
+    }
   });
 
   idle_timer.set_callback([&, remote] {
     active = false;
     applog.warn("client {} timeout, closing ...", remote);
-    (void)in.close();
-    (void)out.close();
+    try {
+      cs.shutdown_input();
+      cs.shutdown_output();
+    } catch (...) {
+      // void
+    }
   });
   idle_timer.arm(std::chrono::seconds(timeout_seconds));
 
@@ -172,8 +180,8 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
-            } catch (const std::exception &err) {
-              applog.error("Error closing connections: {}", err.what());
+            } catch (const std::exception &ex) {
+              applog.error("Error closing connections: {}", ex.what());
             }
           })
           .finally([&gate, &connection_count] {
@@ -197,7 +205,7 @@ int main(int argc, char **argv) {
   std::cout << PROJECT_VERSION << std::endl;
   seastar::app_template app;
   namespace po = boost::program_options;
-  app.add_options()("port,p", po::value<uint16_t>()->default_value(8080),
+  app.add_options()("port,p", po::value<uint16_t>()->default_value(5255),
                     "SMTP port to listen on")(
       "timeout,t", po::value<uint32_t>()->default_value(30),
       "Client idle timeout in seconds");
