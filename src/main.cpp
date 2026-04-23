@@ -223,7 +223,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
         if (found) {
           inDataMode = false;
           chunks.clear();
-          co_await out.write("250 OK queued\r\n");
+          co_await out.write("250 OK: message queued\r\n");
           co_await out.flush();
         }
       } else {
