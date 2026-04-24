@@ -237,6 +237,22 @@ seastar::sstring generate_random_logname() {
   return out;
 }
 
+seastar::sstring generate_email_filename() {
+  seastar::sstring out{sstring::initialized_later(), 40};
+  auto *p = out.data();
+  seastar::sstring random_uuid = uuidv7::generate();
+  for (char c : random_uuid) {
+    if (c != '\n') {
+      *p++ = c;
+    }
+  }
+  *p++ = '.';
+  *p++ = 'e';
+  *p++ = 'm';
+  *p++ = 'l';
+  return out;
+}
+
 ip_result get_ip_address(seastar::socket_address &remote) {
   const char *res = nullptr;
   ip_result result;
