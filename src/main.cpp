@@ -51,6 +51,7 @@ this software will be made available under the specified Change License.
 
 #include "stop_signal.hh"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
 #include <chrono>
@@ -65,6 +66,9 @@ this software will be made available under the specified Change License.
 #include <string_view>
 #include <system_error>
 #include <utility>
+
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
 
 using namespace seastar;
 
@@ -781,7 +785,14 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
 }
 
 int main(int argc, char **argv) {
-  std::cout << PROJECT_VERSION << std::endl;
+  char **it = std::find_if(argv, argv + argc, [](const char *arg) {
+    return std::string_view(arg) == "--version";
+  });
+
+  if (it != argv + argc) {
+    std::cout << PROJECT_VERSION << std::endl;
+    return EXIT_SUCCESS;
+  }
   seastar::app_template app;
 
   uint16_t port = 2525;
@@ -805,6 +816,8 @@ int main(int argc, char **argv) {
   // clang-format on
 
   return app.run(argc, argv, [&app]() -> seastar::future<> {
+    applog.info("mail version {}", PROJECT_VERSION);
+
     // TODO: Load domain configuration
     const seastar::sstring domain = "maildomain.ngo";
     size_t email_size_limit = 524288; // 512KB
