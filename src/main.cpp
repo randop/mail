@@ -43,6 +43,7 @@ this software will be made available under the specified Change License.
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/timer-set.hh>
 #include <seastar/net/api.hh>
+#include <seastar/net/tls.hh>
 #include <seastar/util/closeable.hh>
 #include <seastar/util/log.hh>
 #include <seastar/util/tmp_file.hh>
@@ -50,6 +51,7 @@ this software will be made available under the specified Change License.
 #include "stop_signal.hh"
 
 #include <arpa/inet.h>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <exception>
@@ -279,6 +281,58 @@ ip_result get_ip_address(seastar::socket_address &remote) {
 
   return result;
 }
+
+struct smtp_session {
+  connected_socket cs;
+  std::unique_ptr<output_stream<char>> out;
+  input_stream<char> in;
+  std::unique_ptr<output_stream<char>> logfile;
+  bool is_tls = false;
+
+  smtp_session(connected_socket cs_obj, output_stream<char> logfile_obj)
+      : cs(std::move(cs)),
+        out(std::make_unique<output_stream<char>>(this->cs.output())),
+        in(this->cs.input()),
+        logfile(std::make_unique<output_stream<char>>(std::move(logfile_obj))) {
+  }
+
+  future<> send(std::string_view msg) {
+    if (logfile) {
+      co_await logfile->write(msg.data(), msg.size());
+    }
+    if (out) {
+      co_await out->write(msg.data(), msg.size());
+      co_await out->flush();
+    }
+  }
+
+  future<> upgrade_tls(shared_ptr<tls::server_credentials> certs) {
+    if (out) {
+      co_await out->flush();
+      /*** IMPORTANT: out.release() to avoid TLS upgrade issues ***/
+      (void)out.release();
+    }
+    in = {};
+
+    cs = co_await tls::wrap_server(certs, std::move(cs));
+    out = std::make_unique<output_stream<char>>(cs.output());
+    in = cs.input();
+    is_tls = true;
+  }
+
+  future<> close() {
+    cs.shutdown_output();
+    cs.shutdown_input();
+    if (out) {
+      co_await out->close();
+      out = nullptr;
+    }
+    if (logfile) {
+      co_await logfile->close();
+      logfile = nullptr;
+    }
+  }
+};
 
 seastar::future<> handle_connection(seastar::connected_socket cs,
                                     seastar::socket_address remote,
