@@ -472,8 +472,8 @@ seastar::future<> handle_connection(
     });
     idle_timer.arm(std::chrono::seconds(timeout_seconds));
 
-    co_await session->send(
-        seastar::sstring(std::format("220 {} Service ready\r\n", domain.data()));
+    co_await session->send(seastar::sstring(
+        std::format("220 {} Service ready\r\n", domain.data())));
 
     while (active) {
       temporary_buffer<char> buf = co_await session->in.read();
