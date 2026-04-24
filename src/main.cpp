@@ -365,23 +365,8 @@ struct smtp_session {
   }
 };
 
-/// @brief Checks whether a given SMTP command is present in a const char*.
-///
-/// Performs a case-insensitive comparison to determine if the SMTP command
-/// @p a appears within or matches the command string @p b.
-///
-/// @param a  The line to search within.
-///           Must be a valid NUL-terminated C string; must not be `nullptr`.
-/// @param b  The SMTP command to search for (e.g., `"EHLO"`, `"STARTTLS"`).
-///
-/// @return `true`  if @p b is found in @p a (case-insensitively),
-///         `false` otherwise.
-///
-/// @note This function is `constexpr` and may be evaluated at compile time
-///       if both arguments are constant expressions.
-///
 /// @warning Passing `nullptr` for @p a results in undefined behavior.
-constexpr bool has_smtp_command(const char *a, const std::string &b) {
+constexpr bool compare_strings_ab(const char *a, const std::string &b) {
   if (!a) {
     return false;
   }
@@ -412,7 +397,7 @@ seastar::future<> handle_connection(
     seastar::connected_socket cs, seastar::socket_address remote,
     uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
     shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
-    const seastar::sstring domain) {
+    const seastar::sstring domain, const email_domains_t email_domains) {
   auto [ip, ec] = get_ip_address(remote);
   seastar::sstring email_filename = generate_email_filename();
   applog.info("New client {} connection, session: {}", ip, email_filename);
@@ -440,6 +425,9 @@ seastar::future<> handle_connection(
   bool is_data_ended = false;
 
   uint64_t email_pos = 0;
+
+  uint8_t ok_rcpt_count = 0;
+  uint8_t ok_mailfrom_count = 0;
 
   gate.enter();
 
@@ -561,22 +549,23 @@ seastar::future<> handle_connection(
           in_data = false;
           if ((cmd_pos + 4) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
-            if (has_smtp_command(p, "EHLO") || has_smtp_command(p, "HELO")) {
+            if (compare_strings_ab(p, "EHLO") ||
+                compare_strings_ab(p, "HELO")) {
               applog.info("EHLO / HELO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
-            } else if (has_smtp_command(p, "QUIT")) {
+            } else if (compare_strings_ab(p, "QUIT")) {
               applog.info("QUIT found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
-            } else if (has_smtp_command(p, "AUTH")) {
+            } else if (compare_strings_ab(p, "AUTH")) {
               applog.info("AUTH found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
-            } else if (has_smtp_command(p, "DATA")) {
+            } else if (compare_strings_ab(p, "DATA")) {
               applog.info("DATA found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_command = false;
@@ -587,13 +576,13 @@ seastar::future<> handle_connection(
           }
           if ((cmd_pos + 8) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
-            if (has_smtp_command(p, "RCPT TO:")) {
+            if (compare_strings_ab(p, "RCPT TO:")) {
               applog.info("RCPT TO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
             }
-            if (has_smtp_command(p, "STARTTLS")) {
+            if (compare_strings_ab(p, "STARTTLS")) {
               applog.info("STARTTLS found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
@@ -602,7 +591,7 @@ seastar::future<> handle_connection(
           }
           if ((cmd_pos + 10) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
-            if (has_smtp_command(p, "MAIL FROM:")) {
+            if (compare_strings_ab(p, "MAIL FROM:")) {
               applog.info("MAIL FROM found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
@@ -646,10 +635,15 @@ seastar::future<> handle_connection(
           applog.info("command: {}", cmd_view);
 
           if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
+            ok_rcpt_count = 0;
+            ok_mailfrom_count = 0;
+
+            std::string_view domain_sv(domain.data(), domain.size());
+
             co_await session->out->write(seastar::sstring(std::format(
-                "250-{} Nice to meet you, [{}]\r\n", domain.c_str(), ip)));
+                "250-{} Nice to meet you, [{}]\r\n", domain_sv, ip)));
             co_await session->logfile->write(seastar::sstring(std::format(
-                "250-{} Nice to meet you, [{}]\r\n", domain.c_str(), ip)));
+                "250-{} Nice to meet you, [{}]\r\n", domain_sv, ip)));
             co_await session->out->write("250-8BITMIME\r\n");
             co_await session->logfile->write("250-8BITMIME\r\n");
             co_await session->out->write("250-SMTPUTF8\r\n");
@@ -665,6 +659,16 @@ seastar::future<> handle_connection(
             auto [email, ec] = extract_email_address(cmd_view);
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
+
+              std::string_view check_email = email.substr(email.find("@") + 1);
+              for (size_t i = 0; i < email_domains.count; i++) {
+                if (compare_strings_ab(check_email.data(),
+                                       email_domains.domains[i])) {
+                  ok_rcpt_count++;
+                  break;
+                }
+              }
+
             } else {
               co_await session->send("553 5.1.3 Bad email address syntax\r\n");
             }
@@ -672,6 +676,7 @@ seastar::future<> handle_connection(
             auto [email, ec] = extract_email_address(cmd_view);
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
+              ok_mailfrom_count++;
             } else {
               co_await session->send("501 5.1.3 Bad email address syntax\r\n");
             }
@@ -680,10 +685,20 @@ seastar::future<> handle_connection(
             co_await session->upgrade_tls(certs);
             applog.info("Session {} upgraded to TLS", remote);
           } else if (cmd_view.starts_with("DATA")) {
-            in_data = true;
-            in_command = false;
-            co_await session->send(
-                "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
+            if (ok_rcpt_count >= 1 && ok_mailfrom_count >= 1) {
+              in_data = true;
+              in_command = false;
+              co_await session->send(
+                  "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
+            } else {
+              in_command = true;
+              in_data = false;
+              if (ok_rcpt_count == 0) {
+                co_await session->send("554 No valid recipients\r\n");
+              } else {
+                co_await session->send("503 Bad sequence of commands\r\n");
+              }
+            }
           } else if (cmd_view.starts_with("AUTH")) {
             co_await session->send("502 Command not implemented\r\n");
           } else if (cmd_view.starts_with("QUIT")) {
@@ -746,12 +761,11 @@ seastar::future<> handle_connection(
   co_return;
 }
 
-seastar::future<> serve(uint16_t port, seastar::abort_source &as,
-                        seastar::gate &gate, uint32_t timeout_seconds,
-                        const size_t email_size_limit,
-                        const seastar::sstring domain,
-                        const seastar::sstring certificate,
-                        const seastar::sstring privatekey) {
+seastar::future<>
+serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
+      uint32_t timeout_seconds, const size_t email_size_limit,
+      const seastar::sstring domain, const seastar::sstring certificate,
+      const seastar::sstring privatekey, const email_domains_t email_domains) {
   applog.info("Loading X.509 certificates...");
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file(certificate, privatekey,
@@ -788,7 +802,8 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
       auto addr = ar.remote_address;
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
-                              gate, as, certs, email_size_limit, domain)
+                              gate, as, certs, email_size_limit, domain,
+                              email_domains)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
@@ -899,8 +914,8 @@ int main(int argc, char **argv) {
 
     applog.info("Using smtp domain as: {}", domain);
 
-    auto email_domains_result = load_email_domains(domain);
-    applog.info("Email domains: {}",
+    auto email_domains_result = load_email_domains(email_domain);
+    applog.info("Email domains accepted: {}",
                 email_helpers::join_email_domains(email_domains_result));
 
     try {
@@ -958,10 +973,11 @@ int main(int argc, char **argv) {
         [port, &abort_sources, &gate, timeout_seconds,
          email_size_limit = email_size_limit, domain = sstring(domain),
          certificate = sstring(certificate_file_path),
-         privatekey = sstring(privatekey_file_path)] {
+         privatekey = sstring(privatekey_file_path),
+         email_domains = email_domains_result] {
           return serve(port, abort_sources.local(), gate.local(),
                        timeout_seconds, email_size_limit, domain, certificate,
-                       privatekey);
+                       privatekey, email_domains);
         });
 
     applog.info("server listening on 0.0.0.0 port {}", port);
