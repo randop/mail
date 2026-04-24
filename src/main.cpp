@@ -379,10 +379,12 @@ constexpr bool has_smtp_command(const char *a, const std::string &b) {
   return i == b.size();
 }
 
-seastar::future<> handle_connection(
-    seastar::connected_socket cs, seastar::socket_address remote,
-    uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
-    shared_ptr<tls::server_credentials> certs, size_t email_size_limit) {
+seastar::future<>
+handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
+                  uint32_t timeout_seconds, seastar::gate &gate,
+                  seastar::abort_source &as,
+                  shared_ptr<tls::server_credentials> certs,
+                  size_t email_size_limit, std::string domain) {
   auto [ip, ec] = get_ip_address(remote);
   seastar::sstring email_filename = generate_email_filename();
   applog.info("New client {} connection, session: {}", ip, email_filename);
@@ -454,7 +456,8 @@ seastar::future<> handle_connection(
     });
     idle_timer.arm(std::chrono::seconds(timeout_seconds));
 
-    co_await session->send("220 maildomain.ngo Service ready\r\n");
+    co_await session->send(
+        seastar::sstring(std::format("220 {} Service ready\r\n", domain)));
 
     while (active) {
       temporary_buffer<char> buf = co_await session->in.read();
@@ -615,15 +618,10 @@ seastar::future<> handle_connection(
           applog.info("command: {}", cmd_view);
 
           if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
-
-            co_await session->out->write(
-                "250-maildomain.ngo Nice to meet you, [");
-            co_await session->logfile->write(
-                "250-maildomain.ngo Nice to meet you, [");
-            co_await session->out->write(ip, std::strlen(ip));
-            co_await session->logfile->write(ip, std::strlen(ip));
-            co_await session->out->write("]\r\n");
-            co_await session->logfile->write("]\r\n");
+            co_await session->out->write(seastar::sstring(
+                std::format("250-{} Nice to meet you, [{}]\r\n", domain, ip)));
+            co_await session->logfile->write(seastar::sstring(
+                std::format("250-{} Nice to meet you, [{}]\r\n", domain, ip)));
             co_await session->out->write("250-8BITMIME\r\n");
             co_await session->logfile->write("250-8BITMIME\r\n");
             co_await session->out->write("250-SMTPUTF8\r\n");
@@ -713,7 +711,7 @@ seastar::future<> handle_connection(
 
 seastar::future<> serve(uint16_t port, seastar::abort_source &as,
                         seastar::gate &gate, uint32_t timeout_seconds,
-                        size_t email_size_limit) {
+                        size_t email_size_limit, std::string domain) {
 
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file("cert.pem", "key.pem",
@@ -750,7 +748,7 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
       auto addr = ar.remote_address;
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
-                              gate, as, certs, email_size_limit)
+                              gate, as, certs, email_size_limit, domain)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
@@ -782,6 +780,9 @@ int main(int argc, char **argv) {
   uint16_t port = 2525;
   uint16_t default_timeout_seconds = 30;
   size_t email_size_limit = 524288; // 512KB
+  // TODO: Load domain configuration
+  std::string domain = "maildomain.ngo";
+  applog.info("Using smtp domain as: {}", domain);
 
   namespace po = boost::program_options;
   app.add_options()("port,p", po::value<uint16_t>()->default_value(port),
@@ -789,42 +790,45 @@ int main(int argc, char **argv) {
       "timeout,t",
       po::value<uint32_t>()->default_value(default_timeout_seconds),
       "Client idle timeout in seconds");
-  return app.run(argc, argv, [&app, &email_size_limit]() -> seastar::future<> {
-    uint16_t port = app.configuration()["port"].as<uint16_t>();
-    uint32_t timeout_seconds = app.configuration()["timeout"].as<uint32_t>();
+  return app.run(
+      argc, argv, [&app, &email_size_limit, &domain]() -> seastar::future<> {
+        uint16_t port = app.configuration()["port"].as<uint16_t>();
+        uint32_t timeout_seconds =
+            app.configuration()["timeout"].as<uint32_t>();
 
-    auto stop_signal = std::make_shared<seastar_apps_lib::stop_signal>();
+        auto stop_signal = std::make_shared<seastar_apps_lib::stop_signal>();
 
-    seastar::sharded<seastar::gate> gate;
-    co_await gate.start();
+        seastar::sharded<seastar::gate> gate;
+        co_await gate.start();
 
-    seastar::sharded<seastar::abort_source> abort_sources;
-    co_await abort_sources.start();
+        seastar::sharded<seastar::abort_source> abort_sources;
+        co_await abort_sources.start();
 
-    auto shards_future = seastar::smp::invoke_on_all(
-        [port, &abort_sources, &gate, timeout_seconds, email_size_limit] {
-          return serve(port, abort_sources.local(), gate.local(),
-                       timeout_seconds, email_size_limit);
-        });
+        auto shards_future = seastar::smp::invoke_on_all(
+            [port, &abort_sources, &gate, timeout_seconds, email_size_limit,
+             domain] {
+              return serve(port, abort_sources.local(), gate.local(),
+                           timeout_seconds, email_size_limit, domain);
+            });
 
-    applog.info("server listening on 0.0.0.0 port {}", port);
-    co_await stop_signal->wait();
+        applog.info("server listening on 0.0.0.0 port {}", port);
+        co_await stop_signal->wait();
 
-    applog.info("aborting shards...");
-    co_await abort_sources.invoke_on_all(
-        [](seastar::abort_source &as) { as.request_abort(); });
+        applog.info("aborting shards...");
+        co_await abort_sources.invoke_on_all(
+            [](seastar::abort_source &as) { as.request_abort(); });
 
-    applog.info("stopping smp shards...");
-    co_await std::move(shards_future);
+        applog.info("stopping smp shards...");
+        co_await std::move(shards_future);
 
-    applog.info("stopping gates shards ...");
-    co_await gate.invoke_on_all([](seastar::gate &g) { return g.close(); });
+        applog.info("stopping gates shards ...");
+        co_await gate.invoke_on_all([](seastar::gate &g) { return g.close(); });
 
-    applog.info("stopping abort sources...");
-    co_await abort_sources.stop();
-    co_await gate.stop();
+        applog.info("stopping abort sources...");
+        co_await abort_sources.stop();
+        co_await gate.stop();
 
-    applog.info("server is exiting...");
-    co_return;
-  });
+        applog.info("server is exiting...");
+        co_return;
+      });
 }
