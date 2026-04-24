@@ -73,3 +73,13 @@ CMakeUserPresets.json
 
 # External projects
 *-prefix/
+
+# self-signed certificates
+cert.pem
+key.pem
+
+# email files
+*.eml
+
+# smtp logs
+smtp*.log

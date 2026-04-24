@@ -381,114 +381,313 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
                                     seastar::socket_address remote,
                                     uint32_t timeout_seconds,
                                     seastar::gate &gate,
-                                    seastar::abort_source &as) {
+                                    seastar::abort_source &as,
+
+                                    shared_ptr<tls::server_credentials> certs) {
   auto [ip, ec] = get_ip_address(remote);
-  applog.info("New client {} connection", ip);
-  seastar::sstring log_filename = "/tmp/" + generate_random_logname();
-  auto tmp_file = co_await seastar::open_file_dma(
-      log_filename, seastar::open_flags::rw | seastar::open_flags::create);
-  applog.info("Writing to {} for client {}", log_filename, remote);
-  auto in = cs.input();
-  auto out = cs.output();
+  seastar::sstring email_filename = generate_email_filename();
+  applog.info("New client {} connection, session: {}", ip, email_filename);
+
+  std::unique_ptr<smtp_session> session;
 
   seastar::timer<> idle_timer;
-  size_t bytes_consumed = 0;
+
+  seastar::sstring cmd_buffer;
+  std::string_view cmd_view;
+  size_t cmd_pos = 0;
+  size_t cmd_start_index = 0;
+  size_t crlf_pos = 0;
+  bool in_command = true;
+  bool in_crlf = false;
+  bool in_cmd_boundary = false;
+
+  seastar::sstring data_buffer;
+  bool in_data = false;
+  size_t data_pos = 0;
+  size_t data_size = 0;
+
   bool active = true;
+  bool is_data_ended = false;
 
-  auto sub = as.subscribe([&]() noexcept {
-    active = false;
-    idle_timer.cancel();
-    applog.warn("aborting client {} ...", remote);
-    try {
-      cs.shutdown_input();
-      cs.shutdown_output();
-    } catch (...) {
-      // void
-    }
-  });
-
-  idle_timer.set_callback([&, remote] {
-    active = false;
-    applog.warn("client {} timeout, closing ...", remote);
-    try {
-      cs.shutdown_input();
-      cs.shutdown_output();
-    } catch (...) {
-      // void
-    }
-  });
-  idle_timer.arm(std::chrono::seconds(timeout_seconds));
+  uint64_t email_pos = 0;
 
   gate.enter();
 
-  co_await out.write("220 mail Service ready\r\n");
-  co_await out.flush();
-
-  std::vector<seastar::temporary_buffer<char>> chunks;
-  size_t offset = 0;
-  bool lineErr = false;
-  bool inDataMode = false;
-
   try {
+    auto log_filename = generate_random_logname();
+
+    seastar::file logfile = co_await open_file_dma(
+        log_filename,
+        open_flags::rw | open_flags::create | open_flags::truncate);
+
+    seastar::file emailfile = co_await seastar::open_file_dma(
+        email_filename, seastar::open_flags::rw | seastar::open_flags::create);
+
+    uint64_t emailfile_align = emailfile.disk_write_dma_alignment();
+    std::string email_buffer;
+    email_buffer.reserve(emailfile_align * 2);
+
+    session = std::make_unique<smtp_session>(
+        std::move(cs), co_await make_file_output_stream(std::move(logfile)));
+
+    auto sub = as.subscribe([&]() noexcept {
+      active = false;
+      idle_timer.cancel();
+      applog.warn("aborting client {} ...", remote);
+      try {
+        session->cs.shutdown_input();
+        session->cs.shutdown_output();
+      } catch (...) {
+        // void
+      }
+    });
+
+    idle_timer.set_callback([&, remote] {
+      active = false;
+      applog.warn("client {} timeout, closing ...", remote);
+      try {
+        session->cs.shutdown_input();
+        session->cs.shutdown_output();
+      } catch (...) {
+        // void
+      }
+    });
+    idle_timer.arm(std::chrono::seconds(timeout_seconds));
+
+    co_await session->send("220 maildomain.ngo Service ready\r\n");
+
     while (active) {
-      auto buf = co_await in.read();
+      temporary_buffer<char> buf = co_await session->in.read();
       if (buf.empty()) {
         break;
       }
 
-      lineErr = false;
       idle_timer.rearm(seastar::timer<>::clock::now() +
                        std::chrono::seconds(timeout_seconds));
 
-      chunks.push_back(buf.share());
-      co_await tmp_file.dma_write(offset, buf.get(), buf.size());
-      offset += buf.size();
-
-      if (inDataMode) {
-        // TODO: write maildir data
-        auto [found, consumed] = find_data_delimeter(chunks);
-        if (found) {
-          inDataMode = false;
-          chunks.clear();
-          co_await out.write("250 OK: message queued\r\n");
-          co_await out.flush();
+      if (!in_data) {
+        cmd_buffer.append(buf.get(), buf.size());
+        if (session->logfile) {
+          co_await session->logfile->write(buf.get(), buf.size());
         }
-      } else {
-        auto [prefix, found, consumed] = find_first_crlf(chunks);
-        if (found) {
-          chunks.clear();
-          if (prefix.find("DATA") != std::string_view::npos) {
-            inDataMode = true;
-            co_await out.write(
-                "354 Start mail input; end with <CRLF>.<CRLF>\r\n");
-          } else if ((prefix.find("EHLO ") != std::string_view::npos) ||
-                     (prefix.find("HELO ") != std::string_view::npos)) {
+      }
 
-            co_await out.write("250-maildomain.ngo Nice to meet you, [");
-            auto [ip, ec] = get_ip_address(remote);
-            co_await out.write(ip, std::strlen(ip));
-            co_await out.write("]\r\n");
-            co_await out.write("250-8BITMIME\r\n");
-            co_await out.write("250-SMTPUTF8\r\n");
-            // Per the SMTP RFC standards: 512 KB × 1024 bytes/KB = 524,288
-            // bytes
-            co_await out.write("250 SIZE 524288\r\n");
-          } else if (prefix.find("QUIT") != std::string_view::npos) {
-            co_await out.write("221 Bye\r\n");
-          } else {
-            if (lineErr) {
-              co_await out.write("500 Syntax error\r\n");
-            } else {
-              co_await out.write("250 OK\r\n");
+      if (in_data) {
+        applog.info("IN DATA MODE...");
+        data_size += buf.size();
+        // TODO: Configuration for email data size limit
+        // LIMIT: SIZE 524288
+        if (data_size > 524288) {
+          co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
+          active = false;
+          break;
+        }
+
+        data_buffer.append(buf.get(), buf.size());
+        if ((data_pos + 7) <= data_buffer.size()) {
+          std::string_view data_terminator = data_buffer.substr(data_pos);
+          if (data_terminator.find("\r\n\r\n.\r\n") != std::string_view::npos) {
+            in_data = false;
+            in_command = true;
+            is_data_ended = true;
+            co_await session->send("250 OK: message queued\r\n");
+          }
+          data_pos = data_buffer.size();
+        }
+
+        if (!is_data_ended) {
+          if (data_buffer.size() > 14 &&
+              ((data_pos - 14) < data_buffer.size())) {
+            std::string_view data_terminator =
+                data_buffer.substr(data_pos - 14);
+            if (data_terminator.find("\r\n\r\n.\r\n") !=
+                std::string_view::npos) {
+              in_data = false;
+              in_command = true;
+              is_data_ended = true;
+              co_await session->send("250 OK: message queued\r\n");
             }
           }
-          co_await out.flush();
+        }
+
+        email_buffer.append(buf.get(), buf.size());
+        if (email_buffer.size() >= emailfile_align) {
+          applog.info("DMA_WRITE: email content <{}>", email_filename);
+          size_t to_write = email_buffer.size() & ~(emailfile_align - 1);
+
+          seastar::temporary_buffer<char> out(to_write);
+          memcpy(out.get_write(), email_buffer.data(), to_write);
+
+          co_await emailfile.dma_write(email_pos, out.get(), to_write);
+          email_pos += to_write;
+
+          // remove written portion (O(n), acceptable for <=512KB)
+          email_buffer = email_buffer.substr(to_write);
+        }
+
+      } else {
+        if (in_command) {
+          in_crlf = false;
+          in_cmd_boundary = false;
+          in_data = false;
+          if ((cmd_pos + 4) <= cmd_buffer.size()) {
+            auto *p = cmd_buffer.data() + cmd_pos;
+            if (has_smtp_command(p, "EHLO") || has_smtp_command(p, "HELO")) {
+              applog.info("EHLO / HELO found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_cmd_boundary = true;
+              cmd_pos += 4;
+            } else if (has_smtp_command(p, "QUIT")) {
+              applog.info("QUIT found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_cmd_boundary = true;
+              cmd_pos += 4;
+            } else if (has_smtp_command(p, "AUTH")) {
+              applog.info("AUTH found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_cmd_boundary = true;
+              cmd_pos += 4;
+            } else if (has_smtp_command(p, "DATA")) {
+              applog.info("DATA found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_command = false;
+              in_data = true;
+              in_cmd_boundary = true;
+              cmd_pos += 4;
+            }
+          }
+          if ((cmd_pos + 8) <= cmd_buffer.size()) {
+            auto *p = cmd_buffer.data() + cmd_pos;
+            if (has_smtp_command(p, "RCPT TO:")) {
+              applog.info("RCPT TO found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_cmd_boundary = true;
+              cmd_pos += 8;
+            }
+            if (has_smtp_command(p, "STARTTLS")) {
+              applog.info("STARTTLS found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_cmd_boundary = true;
+              cmd_pos += 8;
+            }
+          }
+          if ((cmd_pos + 10) <= cmd_buffer.size()) {
+            auto *p = cmd_buffer.data() + cmd_pos;
+            if (has_smtp_command(p, "MAIL FROM:")) {
+              applog.info("MAIL FROM found at {}", cmd_pos);
+              cmd_start_index = cmd_pos;
+              in_cmd_boundary = true;
+              cmd_pos += 10;
+            }
+          }
+        }
+
+        crlf_pos = cmd_pos;
+
+        if (in_cmd_boundary) {
+          while (crlf_pos + 1 < cmd_buffer.size()) {
+            if (cmd_buffer[crlf_pos] == '\r' &&
+                cmd_buffer[crlf_pos + 1] == '\n') {
+              applog.info("<CRLF> found at {}", crlf_pos);
+              crlf_pos += 2;
+              in_command = true;
+              in_crlf = true;
+
+              size_t p_size = (crlf_pos - cmd_start_index) - 1;
+              // guard against negative value
+              if (((crlf_pos - cmd_start_index) - 1) < 0) {
+                p_size = 0;
+              }
+              cmd_view =
+                  std::string_view(cmd_buffer.data() + cmd_start_index, p_size);
+
+              break;
+            }
+            ++crlf_pos;
+          }
+        } else {
+          // clear
+          cmd_view = std::string_view(cmd_buffer.data(), 0);
+          applog.info("clear cmd_view: {}", cmd_view);
+        }
+
+        if (in_command && in_crlf) {
+          cmd_pos = crlf_pos;
+          cmd_start_index = cmd_pos;
+          applog.info("command: {}", cmd_view);
+
+          if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
+
+            co_await session->out->write(
+                "250-maildomain.ngo Nice to meet you, [");
+            co_await session->logfile->write(
+                "250-maildomain.ngo Nice to meet you, [");
+            co_await session->out->write(ip, std::strlen(ip));
+            co_await session->logfile->write(ip, std::strlen(ip));
+            co_await session->out->write("]\r\n");
+            co_await session->logfile->write("]\r\n");
+            co_await session->out->write("250-8BITMIME\r\n");
+            co_await session->logfile->write("250-8BITMIME\r\n");
+            co_await session->out->write("250-SMTPUTF8\r\n");
+            co_await session->logfile->write("250-SMTPUTF8\r\n");
+            co_await session->out->write("250-STARTTLS\r\n");
+            co_await session->logfile->write("250-STARTTLS\r\n");
+            // Per the SMTP RFC standards: 512 KB × 1024 bytes/KB = 524,288
+            // bytes
+            co_await session->out->write("250 SIZE 524288\r\n");
+            co_await session->logfile->write("250 SIZE 524288\r\n");
+            co_await session->out->flush();
+          } else if (cmd_view.starts_with("RCPT TO:")) {
+            co_await session->send("250 Accepted\r\n");
+          } else if (cmd_view.starts_with("MAIL FROM:")) {
+            co_await session->send("250 Accepted\r\n");
+          } else if (cmd_view.starts_with("STARTTLS")) {
+            co_await session->send("220 Ready to start TLS\r\n");
+            co_await session->upgrade_tls(certs);
+            applog.info("Session {} upgraded to TLS", remote);
+          } else if (cmd_view.starts_with("DATA")) {
+            in_data = true;
+            in_command = false;
+            co_await session->send(
+                "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
+          } else if (cmd_view.starts_with("AUTH")) {
+            co_await session->send("502 Command not implemented\r\n");
+          } else if (cmd_view.starts_with("QUIT")) {
+            applog.info("got smtp quit");
+            co_await session->send("221 Bye\r\n");
+          } else {
+            co_await session->send("500 Syntax error\r\n");
+          }
+
+          in_crlf = false;
+
+          // clear
+          cmd_view = std::string_view(cmd_buffer.data(), 0);
         }
       }
     }
-    applog.info("Finished writing {} bytes to {} for client {}", offset,
-                log_filename, remote);
-  } catch (const seastar::timed_out_error &e) {
+
+    // final tail (pad once)
+    if (!email_buffer.empty()) {
+      applog.info("DMA_WRITE: email remnant <{}>", email_filename);
+      size_t padded =
+          (email_buffer.size() + emailfile_align - 1) & ~(emailfile_align - 1);
+
+      seastar::temporary_buffer<char> out(padded);
+
+      memcpy(out.get_write(), email_buffer.data(), email_buffer.size());
+      memset(out.get_write() + email_buffer.size(), 0,
+             padded - email_buffer.size());
+
+      co_await emailfile.dma_write(email_pos, out.get(), padded);
+      email_pos += padded;
+    }
+
+    co_await emailfile.flush();
+
+    applog.info("Writing client {} logs on {} and email file: {}", remote,
+                log_filename, email_filename);
+  } catch (const seastar::timed_out_error &err) {
     applog.info("Client {} idle timeout", remote);
   } catch (const std::exception &ex) {
     applog.warn("Connection {} error: {}", remote, ex.what());
@@ -497,19 +696,16 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
   idle_timer.cancel();
 
   try {
-    co_await in.close();
+    co_await session->in.close();
   } catch (...) {
+    // void
   }
   try {
-    co_await out.close();
+    co_await session->close();
   } catch (...) {
+    // void
   }
 
-  try {
-    co_await tmp_file.close();
-  } catch (const std::exception &ex) {
-    applog.warn("Error closing file for {}: {}", remote, ex.what());
-  }
   applog.info("Client {} connection finished", remote);
 
   gate.leave();
@@ -519,6 +715,10 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
 
 seastar::future<> serve(uint16_t port, seastar::abort_source &as,
                         seastar::gate &gate, uint32_t timeout_seconds) {
+
+  auto certs = make_shared<tls::server_credentials>();
+  co_await certs->set_x509_key_file("cert.pem", "key.pem",
+                                    tls::x509_crt_format::PEM);
   seastar::listen_options opts;
   opts.reuse_address = true;
   opts.lba =
@@ -551,7 +751,7 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
       auto addr = ar.remote_address;
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
-                              gate, as)
+                              gate, as, certs)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
