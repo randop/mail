@@ -33,10 +33,12 @@ this software will be made available under the specified Change License.
 #include <seastar/core/app-template.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/file.hh>
+#include <seastar/core/fstream.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/reactor.hh>
+#include <seastar/core/seastar.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/timer-set.hh>
@@ -54,7 +56,11 @@ this software will be made available under the specified Change License.
 #include <iostream>
 #include <memory>
 #include <random>
+#include <string>
+#include <string_view>
 #include <utility>
+
+using namespace seastar;
 
 static seastar::logger applog("smtp-server");
 
@@ -68,6 +74,11 @@ struct crlf_result {
 struct data_delimeter_result {
   bool found = false;
   size_t bytes_consumed = 0;
+};
+
+struct ip_result {
+  char ip[INET6_ADDRSTRLEN];
+  std::errc ec;
 };
 
 data_delimeter_result find_data_delimeter(
@@ -149,12 +160,97 @@ crlf_result find_first_crlf(
   return {{}, false, chunk_offset};
 }
 
+struct uuidv7 {
+  static seastar::sstring generate() {
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      lowres_system_clock::now().time_since_epoch())
+                      .count();
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<uint64_t> dist;
+
+    uint8_t b[16];
+    uint64_t ts = static_cast<uint64_t>(now_ms);
+    b[0] = static_cast<uint8_t>((ts >> 40) & 0xff);
+    b[1] = static_cast<uint8_t>((ts >> 32) & 0xff);
+    b[2] = static_cast<uint8_t>((ts >> 24) & 0xff);
+    b[3] = static_cast<uint8_t>((ts >> 16) & 0xff);
+    b[4] = static_cast<uint8_t>((ts >> 8) & 0xff);
+    b[5] = static_cast<uint8_t>(ts & 0xff);
+
+    uint64_t rand_a = dist(rng);
+    uint64_t rand_b = dist(rng);
+    b[6] = static_cast<uint8_t>((rand_a >> 56) & 0x0f) | 0x70;
+    b[7] = static_cast<uint8_t>((rand_a >> 48) & 0xff);
+    b[8] = static_cast<uint8_t>((rand_a >> 40) & 0x3f) | 0x80;
+    b[9] = static_cast<uint8_t>((rand_a >> 32) & 0xff);
+    b[10] = static_cast<uint8_t>((rand_a >> 24) & 0xff);
+    b[11] = static_cast<uint8_t>((rand_a >> 16) & 0xff);
+    b[12] = static_cast<uint8_t>((rand_a >> 8) & 0xff);
+    b[13] = static_cast<uint8_t>(rand_a & 0xff);
+    b[14] = static_cast<uint8_t>((rand_b >> 56) & 0xff);
+    b[15] = static_cast<uint8_t>((rand_b >> 48) & 0xff);
+
+    static const char hex[] = "0123456789abcdef";
+    sstring out{sstring::initialized_later(), 36};
+    auto *p = out.data();
+    for (int i = 0; i < 4; ++i) {
+      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
+    }
+    *p++ = '-';
+    for (int i = 4; i < 6; ++i) {
+      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
+    }
+    *p++ = '-';
+    for (int i = 6; i < 8; ++i) {
+      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
+    }
+    *p++ = '-';
+    for (int i = 8; i < 10; ++i) {
+      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
+    }
+    *p++ = '-';
+    for (int i = 10; i < 16; ++i) {
+      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
+    }
+    return out;
+  }
+};
+
+ip_result get_ip_address(seastar::socket_address &remote) {
+  const char *res = nullptr;
+  ip_result result;
+
+  std::strncpy(result.ip, "172.17.0.1", sizeof(result.ip) - 1);
+  result.ip[sizeof(result.ip) - 1] = '\0';
+  result.ec = std::errc::bad_address;
+
+  const sockaddr &sa = remote.as_posix_sockaddr();
+
+  if (sa.sa_family == AF_INET) {
+    res =
+        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in &>(sa).sin_addr,
+                  result.ip, sizeof(result.ip));
+  } else {
+    res = inet_ntop(AF_INET6,
+                    &reinterpret_cast<const sockaddr_in6 &>(sa).sin6_addr,
+                    result.ip, sizeof(result.ip));
+  }
+
+  if (res) {
+    result.ec = std::errc{};
+  }
+
+  return result;
+}
+
 seastar::future<> handle_connection(seastar::connected_socket cs,
                                     seastar::socket_address remote,
                                     uint32_t timeout_seconds,
                                     seastar::gate &gate,
                                     seastar::abort_source &as) {
-  applog.info("New client {} connection", remote);
+  auto [ip, ec] = get_ip_address(remote);
+
+  applog.info("New client {} connection", ip);
   auto seed = std::chrono::system_clock::now().time_since_epoch().count();
   auto rnd = std::mt19937(seed);
   seastar::sstring client_filename =
@@ -166,6 +262,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
   auto out = cs.output();
 
   seastar::timer<> idle_timer;
+  size_t bytes_consumed = 0;
   bool active = true;
 
   auto sub = as.subscribe([&]() noexcept {
@@ -238,23 +335,8 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
                      (prefix.find("HELO ") != std::string_view::npos)) {
 
             co_await out.write("250-maildomain.ngo Nice to meet you, [");
-            char ipbuf[INET6_ADDRSTRLEN];
-            const char *res = nullptr;
-
-            const sockaddr &sa = remote.as_posix_sockaddr();
-
-            if (sa.sa_family == AF_INET) {
-              res = inet_ntop(
-                  AF_INET, &reinterpret_cast<const sockaddr_in &>(sa).sin_addr,
-                  ipbuf, sizeof(ipbuf));
-            } else {
-              res = inet_ntop(
-                  AF_INET6,
-                  &reinterpret_cast<const sockaddr_in6 &>(sa).sin6_addr, ipbuf,
-                  sizeof(ipbuf));
-            }
-
-            co_await out.write(ipbuf, std::strlen(ipbuf));
+            auto [ip, ec] = get_ip_address(remote);
+            co_await out.write(ip, std::strlen(ip));
             co_await out.write("]\r\n");
             co_await out.write("250-8BITMIME\r\n");
             co_await out.write("250-SMTPUTF8\r\n");
