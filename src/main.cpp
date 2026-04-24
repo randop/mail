@@ -1,5 +1,5 @@
 /*****************************************************************************
-mail
+Mail (https://gitlab.com/randop/mail)
   Privacy-first and self-hosted email server
   for modern-era 2026 instead of legacy 1999
 
@@ -62,6 +62,7 @@ this software will be made available under the specified Change License.
 #include <random>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 using namespace seastar;
@@ -85,83 +86,77 @@ struct ip_result {
   std::errc ec;
 };
 
-data_delimeter_result find_data_delimeter(
-    const std::vector<seastar::temporary_buffer<char>> &chunks) noexcept {
-  if (chunks.empty()) {
-    return {};
+struct email_extract_result {
+  seastar::sstring email;
+  std::errc ec{};
+};
+
+struct email_helpers {
+  static inline bool is_atext(char c) noexcept {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '.' ||
+           c == '_' || c == '%' || c == '+' || c == '-';
   }
 
-  constexpr std::string_view delim = "\r\n\r\n\r\n.\r\n";
-  constexpr size_t dlen = delim.size();
+  static inline bool is_domain_char(char c) noexcept {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-';
+  }
 
-  size_t chunk_offset = 0;
-  int state = 0;
+  static bool validate_email(std::string_view v) noexcept {
+    auto at = v.find('@');
+    if (at == std::string_view::npos || at == 0 || at == v.size() - 1)
+      return false;
 
-  for (const auto &buf : chunks) {
-    if (buf.empty())
-      continue;
+    auto local = v.substr(0, at);
+    auto domain = v.substr(at + 1);
 
-    const char *p = buf.get();
-    const char *const end = p + buf.size();
-
-    while (p < end) {
-      const char c = *p++;
-
-      if (c == delim[state]) {
-        ++state;
-        if (state == dlen) {
-          return {true, chunk_offset + (p - buf.get())};
-        }
-      } else {
-        state = (c == delim[0]) ? 1 : 0;
-      }
+    // local-part
+    for (char c : local) {
+      if (!is_atext(c))
+        return false;
     }
 
-    chunk_offset += buf.size();
-  }
+    // domain must contain at least one dot
+    if (domain.find('.') == std::string_view::npos)
+      return false;
 
-  return {false, chunk_offset};
-}
-
-crlf_result find_first_crlf(
-    const std::vector<seastar::temporary_buffer<char>> &chunks) noexcept {
-  if (chunks.empty()) {
-    return {};
-  }
-
-  size_t chunk_offset = 0;
-
-  for (size_t i = 0; i < chunks.size(); ++i) {
-    const auto &buf = chunks[i];
-    if (buf.empty())
-      continue;
-
-    const char *data = buf.get();
-    const size_t len = buf.size();
-
-    for (size_t j = 0; j < len; ++j) {
-      if (data[j] == '\n') {
-        if (j > 0 && data[j - 1] == '\r') {
-          std::string_view prefix(data, j - 1);
-          return {prefix, true, chunk_offset + j + 1};
-        }
-      }
+    for (char c : domain) {
+      if (!is_domain_char(c))
+        return false;
     }
 
-    if (len > 0 && data[len - 1] == '\r') {
-      if (i + 1 < chunks.size()) {
-        const auto &next_buf = chunks[i + 1];
-        if (!next_buf.empty() && next_buf.get()[0] == '\n') {
-          std::string_view prefix(data, len - 1);
-          return {prefix, true, chunk_offset + len + 1};
-        }
-      }
-    }
+    return true;
+  }
+};
 
-    chunk_offset += len;
+email_extract_result extract_email_address(std::string_view sv) {
+  if (auto l = sv.find('<'); l != std::string_view::npos) {
+    if (auto r = sv.find('>', l + 1); r != std::string_view::npos) {
+      auto candidate = sv.substr(l + 1, r - (l + 1));
+      if (email_helpers::validate_email(candidate)) {
+        return {seastar::sstring(candidate), {}};
+      }
+      return {"", std::errc::invalid_argument};
+    }
   }
 
-  return {{}, false, chunk_offset};
+  for (size_t i = 0; i < sv.size(); ++i) {
+    if (sv[i] == '@') {
+      size_t start = i;
+      while (start > 0 && email_helpers::is_atext(sv[start - 1]))
+        --start;
+
+      size_t end = i + 1;
+      while (end < sv.size() && email_helpers::is_domain_char(sv[end]))
+        ++end;
+
+      auto candidate = sv.substr(start, end - start);
+      if (email_helpers::validate_email(candidate)) {
+        return {seastar::sstring(candidate), {}};
+      }
+    }
+  }
+
+  return {"", std::errc::result_out_of_range};
 }
 
 struct uuidv7 {
@@ -634,9 +629,19 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
                 std::format("250 SIZE {}\r\n", email_size_limit)));
             co_await session->out->flush();
           } else if (cmd_view.starts_with("RCPT TO:")) {
-            co_await session->send("250 Accepted\r\n");
+            auto [email, ec] = extract_email_address(cmd_view);
+            if (ec == std::errc()) {
+              co_await session->send("250 Accepted\r\n");
+            } else {
+              co_await session->send("553 5.1.3 Bad email address syntax\r\n");
+            }
           } else if (cmd_view.starts_with("MAIL FROM:")) {
-            co_await session->send("250 Accepted\r\n");
+            auto [email, ec] = extract_email_address(cmd_view);
+            if (ec == std::errc()) {
+              co_await session->send("250 Accepted\r\n");
+            } else {
+              co_await session->send("501 5.1.3 Bad email address syntax\r\n");
+            }
           } else if (cmd_view.starts_with("STARTTLS")) {
             co_await session->send("220 Ready to start TLS\r\n");
             co_await session->upgrade_tls(certs);
