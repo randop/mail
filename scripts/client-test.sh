@@ -67,3 +67,24 @@ swaks \
   --body "Test message body" \
   --attach /path/to/your/file.pdf \
   --no-suppress-data
+
+swaks \
+  --to recipient@example.com \
+  --from sender@example.com \
+  --server 127.0.0.1:5255 \
+  --tls \
+  --header "Subject: Test Email with TLS" \
+  --body "Test message body" \
+  --attach-type image/jpg --attach @/notebook/assets/stlink-v2-01.jpg \
+  --no-suppress-data
+
+# server reply: 552 5.3.4 Message size limit exceeded
+swaks \
+  --to recipient@example.com \
+  --from sender@example.com \
+  --server 127.0.0.1:5255 \
+  --tls \
+  --header "Subject: Test Email with TLS" \
+  --body "Test message body with big file" \
+  --attach-type image/jpg --attach @/notebook/assets/universal-protoboard-pcb-01.png \
+  --no-suppress-data

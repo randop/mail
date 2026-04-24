@@ -595,7 +595,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
 
               size_t p_size = (crlf_pos - cmd_start_index) - 1;
               // guard against negative value
-              if (((crlf_pos - cmd_start_index) - 1) < 0) {
+              if ((crlf_pos - cmd_start_index - 1) < 0) {
                 p_size = 0;
               }
               cmd_view =
