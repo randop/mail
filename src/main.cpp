@@ -41,6 +41,7 @@ this software will be made available under the specified Change License.
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/sstring.hh>
 #include <seastar/core/timer-set.hh>
 #include <seastar/net/api.hh>
 #include <seastar/net/tls.hh>
@@ -55,6 +56,7 @@ this software will be made available under the specified Change License.
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <format>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -377,13 +379,10 @@ constexpr bool has_smtp_command(const char *a, const std::string &b) {
   return i == b.size();
 }
 
-seastar::future<> handle_connection(seastar::connected_socket cs,
-                                    seastar::socket_address remote,
-                                    uint32_t timeout_seconds,
-                                    seastar::gate &gate,
-                                    seastar::abort_source &as,
-
-                                    shared_ptr<tls::server_credentials> certs) {
+seastar::future<> handle_connection(
+    seastar::connected_socket cs, seastar::socket_address remote,
+    uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
+    shared_ptr<tls::server_credentials> certs, size_t email_size_limit) {
   auto [ip, ec] = get_ip_address(remote);
   seastar::sstring email_filename = generate_email_filename();
   applog.info("New client {} connection, session: {}", ip, email_filename);
@@ -400,6 +399,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
   bool in_command = true;
   bool in_crlf = false;
   bool in_cmd_boundary = false;
+  constexpr int ZERO = 0;
 
   seastar::sstring data_buffer;
   bool in_data = false;
@@ -475,9 +475,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
       if (in_data) {
         applog.info("IN DATA MODE...");
         data_size += buf.size();
-        // TODO: Configuration for email data size limit
-        // LIMIT: SIZE 524288
-        if (data_size > 524288) {
+        if (data_size > email_size_limit) {
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
           active = false;
           break;
@@ -595,7 +593,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
 
               size_t p_size = (crlf_pos - cmd_start_index) - 1;
               // guard against negative value
-              if ((crlf_pos - cmd_start_index - 1) < 0) {
+              if ((crlf_pos - cmd_start_index - 1) < ZERO) {
                 p_size = 0;
               }
               cmd_view =
@@ -632,10 +630,10 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
             co_await session->logfile->write("250-SMTPUTF8\r\n");
             co_await session->out->write("250-STARTTLS\r\n");
             co_await session->logfile->write("250-STARTTLS\r\n");
-            // Per the SMTP RFC standards: 512 KB × 1024 bytes/KB = 524,288
-            // bytes
-            co_await session->out->write("250 SIZE 524288\r\n");
-            co_await session->logfile->write("250 SIZE 524288\r\n");
+            co_await session->out->write(seastar::sstring(
+                std::format("250 SIZE {}\r\n", email_size_limit)));
+            co_await session->logfile->write(seastar::sstring(
+                std::format("250 SIZE {}\r\n", email_size_limit)));
             co_await session->out->flush();
           } else if (cmd_view.starts_with("RCPT TO:")) {
             co_await session->send("250 Accepted\r\n");
@@ -714,7 +712,8 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
 }
 
 seastar::future<> serve(uint16_t port, seastar::abort_source &as,
-                        seastar::gate &gate, uint32_t timeout_seconds) {
+                        seastar::gate &gate, uint32_t timeout_seconds,
+                        size_t email_size_limit) {
 
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file("cert.pem", "key.pem",
@@ -751,7 +750,7 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
       auto addr = ar.remote_address;
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
-                              gate, as, certs)
+                              gate, as, certs, email_size_limit)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
@@ -779,12 +778,18 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
 int main(int argc, char **argv) {
   std::cout << PROJECT_VERSION << std::endl;
   seastar::app_template app;
+
+  uint16_t port = 2525;
+  uint16_t default_timeout_seconds = 30;
+  size_t email_size_limit = 524288; // 512KB
+
   namespace po = boost::program_options;
-  app.add_options()("port,p", po::value<uint16_t>()->default_value(5255),
+  app.add_options()("port,p", po::value<uint16_t>()->default_value(port),
                     "SMTP port to listen on")(
-      "timeout,t", po::value<uint32_t>()->default_value(30),
+      "timeout,t",
+      po::value<uint32_t>()->default_value(default_timeout_seconds),
       "Client idle timeout in seconds");
-  return app.run(argc, argv, [&app]() -> seastar::future<> {
+  return app.run(argc, argv, [&app, &email_size_limit]() -> seastar::future<> {
     uint16_t port = app.configuration()["port"].as<uint16_t>();
     uint32_t timeout_seconds = app.configuration()["timeout"].as<uint32_t>();
 
@@ -796,10 +801,11 @@ int main(int argc, char **argv) {
     seastar::sharded<seastar::abort_source> abort_sources;
     co_await abort_sources.start();
 
-    auto shards_future = seastar::smp::invoke_on_all([port, &abort_sources,
-                                                      &gate, timeout_seconds] {
-      return serve(port, abort_sources.local(), gate.local(), timeout_seconds);
-    });
+    auto shards_future = seastar::smp::invoke_on_all(
+        [port, &abort_sources, &gate, timeout_seconds, email_size_limit] {
+          return serve(port, abort_sources.local(), gate.local(),
+                       timeout_seconds, email_size_limit);
+        });
 
     applog.info("server listening on 0.0.0.0 port {}", port);
     co_await stop_signal->wait();
