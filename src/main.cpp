@@ -290,7 +290,7 @@ struct smtp_session {
   bool is_tls = false;
 
   smtp_session(connected_socket cs_obj, output_stream<char> logfile_obj)
-      : cs(std::move(cs)),
+      : cs(std::move(cs_obj)),
         out(std::make_unique<output_stream<char>>(this->cs.output())),
         in(this->cs.input()),
         logfile(std::make_unique<output_stream<char>>(std::move(logfile_obj))) {
@@ -334,21 +334,44 @@ struct smtp_session {
   }
 };
 
+constexpr bool has_smtp_command(const char *a, const std::string &b) {
+  if (!a) {
+    return false;
+  }
+
+  size_t i = 0;
+
+  auto to_lower = [](unsigned char c) constexpr {
+    return static_cast<char>(std::tolower(c));
+  };
+
+  size_t b_size = b.size();
+
+  while (a[i] != '\0' && i < b_size) {
+    if (to_lower(static_cast<unsigned char>(a[i])) !=
+        to_lower(static_cast<unsigned char>(b[i]))) {
+      return false;
+    }
+    if ((i + 1) > b_size) {
+      break;
+    }
+    ++i;
+  }
+
+  return i == b.size();
+}
+
 seastar::future<> handle_connection(seastar::connected_socket cs,
                                     seastar::socket_address remote,
                                     uint32_t timeout_seconds,
                                     seastar::gate &gate,
                                     seastar::abort_source &as) {
   auto [ip, ec] = get_ip_address(remote);
-
   applog.info("New client {} connection", ip);
-  auto seed = std::chrono::system_clock::now().time_since_epoch().count();
-  auto rnd = std::mt19937(seed);
-  seastar::sstring client_filename =
-      "/tmp/" + std::to_string(rnd()) + ".data.log";
+  seastar::sstring log_filename = "/tmp/" + generate_random_logname();
   auto tmp_file = co_await seastar::open_file_dma(
-      client_filename, seastar::open_flags::rw | seastar::open_flags::create);
-  applog.info("Writing to {} for client {}", client_filename, remote);
+      log_filename, seastar::open_flags::rw | seastar::open_flags::create);
+  applog.info("Writing to {} for client {}", log_filename, remote);
   auto in = cs.input();
   auto out = cs.output();
 
@@ -448,7 +471,7 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
       }
     }
     applog.info("Finished writing {} bytes to {} for client {}", offset,
-                client_filename, remote);
+                log_filename, remote);
   } catch (const seastar::timed_out_error &e) {
     applog.info("Client {} idle timeout", remote);
   } catch (const std::exception &ex) {
