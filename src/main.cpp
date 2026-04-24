@@ -216,6 +216,27 @@ struct uuidv7 {
   }
 };
 
+seastar::sstring generate_random_logname() {
+  seastar::sstring out{sstring::initialized_later(), 45};
+  auto *p = out.data();
+  *p++ = 's';
+  *p++ = 'm';
+  *p++ = 't';
+  *p++ = 'p';
+  *p++ = '-';
+  seastar::sstring random_uuid = uuidv7::generate();
+  for (char c : random_uuid) {
+    if (c != '\n') {
+      *p++ = c;
+    }
+  }
+  *p++ = '.';
+  *p++ = 'l';
+  *p++ = 'o';
+  *p++ = 'g';
+  return out;
+}
+
 ip_result get_ip_address(seastar::socket_address &remote) {
   const char *res = nullptr;
   ip_result result;
