@@ -56,6 +56,7 @@ this software will be made available under the specified Change License.
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <iostream>
 #include <memory>
@@ -374,12 +375,11 @@ constexpr bool has_smtp_command(const char *a, const std::string &b) {
   return i == b.size();
 }
 
-seastar::future<>
-handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
-                  uint32_t timeout_seconds, seastar::gate &gate,
-                  seastar::abort_source &as,
-                  shared_ptr<tls::server_credentials> certs,
-                  size_t email_size_limit, std::string domain) {
+seastar::future<> handle_connection(
+    seastar::connected_socket cs, seastar::socket_address remote,
+    uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
+    shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
+    const seastar::sstring domain) {
   auto [ip, ec] = get_ip_address(remote);
   seastar::sstring email_filename = generate_email_filename();
   applog.info("New client {} connection, session: {}", ip, email_filename);
@@ -613,10 +613,10 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
           applog.info("command: {}", cmd_view);
 
           if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
-            co_await session->out->write(seastar::sstring(
-                std::format("250-{} Nice to meet you, [{}]\r\n", domain, ip)));
-            co_await session->logfile->write(seastar::sstring(
-                std::format("250-{} Nice to meet you, [{}]\r\n", domain, ip)));
+            co_await session->out->write(seastar::sstring(std::format(
+                "250-{} Nice to meet you, [{}]\r\n", domain.c_str(), ip)));
+            co_await session->logfile->write(seastar::sstring(std::format(
+                "250-{} Nice to meet you, [{}]\r\n", domain.c_str(), ip)));
             co_await session->out->write("250-8BITMIME\r\n");
             co_await session->logfile->write("250-8BITMIME\r\n");
             co_await session->out->write("250-SMTPUTF8\r\n");
@@ -654,7 +654,6 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
           } else if (cmd_view.starts_with("AUTH")) {
             co_await session->send("502 Command not implemented\r\n");
           } else if (cmd_view.starts_with("QUIT")) {
-            applog.info("got smtp quit");
             co_await session->send("221 Bye\r\n");
           } else {
             co_await session->send("500 Syntax error\r\n");
@@ -716,10 +715,13 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
 
 seastar::future<> serve(uint16_t port, seastar::abort_source &as,
                         seastar::gate &gate, uint32_t timeout_seconds,
-                        size_t email_size_limit, std::string domain) {
-
+                        const size_t email_size_limit,
+                        const seastar::sstring domain,
+                        const seastar::sstring certificate,
+                        const seastar::sstring privatekey) {
+  applog.info("Loading X.509 certificates...");
   auto certs = make_shared<tls::server_credentials>();
-  co_await certs->set_x509_key_file("cert.pem", "key.pem",
+  co_await certs->set_x509_key_file(certificate, privatekey,
                                     tls::x509_crt_format::PEM);
   seastar::listen_options opts;
   opts.reuse_address = true;
@@ -784,56 +786,117 @@ int main(int argc, char **argv) {
 
   uint16_t port = 2525;
   uint16_t default_timeout_seconds = 30;
-  size_t email_size_limit = 524288; // 512KB
-  // TODO: Load domain configuration
-  std::string domain = "maildomain.ngo";
-  applog.info("Using smtp domain as: {}", domain);
 
+  // clang-format off
   namespace po = boost::program_options;
-  app.add_options()("port,p", po::value<uint16_t>()->default_value(port),
-                    "SMTP port to listen on")(
-      "timeout,t",
-      po::value<uint32_t>()->default_value(default_timeout_seconds),
-      "Client idle timeout in seconds");
-  return app.run(
-      argc, argv, [&app, &email_size_limit, &domain]() -> seastar::future<> {
-        uint16_t port = app.configuration()["port"].as<uint16_t>();
-        uint32_t timeout_seconds =
-            app.configuration()["timeout"].as<uint32_t>();
+    app.add_options()
+      ("port,p",
+        po::value<uint16_t>()->default_value(port),
+        "SMTP port to listen on")
+      ("timeout,t",
+        po::value<uint32_t>()->default_value(default_timeout_seconds),
+        "Client idle timeout in seconds")
+      ("certificate,crt",
+        po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/certificate.crt"),
+        "X.509 certificate file")
+      ("privatekey,pk",
+        po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/private.key"),
+        "X.509 private key file");
+  // clang-format on
 
-        auto stop_signal = std::make_shared<seastar_apps_lib::stop_signal>();
+  return app.run(argc, argv, [&app]() -> seastar::future<> {
+    // TODO: Load domain configuration
+    const seastar::sstring domain = "maildomain.ngo";
+    size_t email_size_limit = 524288; // 512KB
+    uint16_t port = app.configuration()["port"].as<uint16_t>();
+    uint32_t timeout_seconds = app.configuration()["timeout"].as<uint32_t>();
+    sstring certificate_file_path =
+        app.configuration()["certificate"].as<sstring>();
+    sstring privatekey_file_path =
+        app.configuration()["privatekey"].as<sstring>();
+    sstring cwd = std::filesystem::current_path().string();
 
-        seastar::sharded<seastar::gate> gate;
-        co_await gate.start();
+    applog.info("Using smtp domain as: {}", domain);
 
-        seastar::sharded<seastar::abort_source> abort_sources;
-        co_await abort_sources.start();
+    try {
+      std::ifstream certificate_file(certificate_file_path);
+      if (!certificate_file.good()) {
+        certificate_file_path = std::string(std::filesystem::weakly_canonical(
+            std::filesystem::path(cwd.c_str()) / "certificate.crt"));
+      }
+      if (!co_await seastar::file_accessible(certificate_file_path,
+                                             seastar::access_flags::read)) {
 
-        auto shards_future = seastar::smp::invoke_on_all(
-            [port, &abort_sources, &gate, timeout_seconds, email_size_limit,
-             domain] {
-              return serve(port, abort_sources.local(), gate.local(),
-                           timeout_seconds, email_size_limit, domain);
-            });
+        applog.error("Error reading certificate file: {}",
+                     certificate_file_path);
+      }
+    } catch (std::exception_ptr ep) {
+      try {
+        std::rethrow_exception(ep);
+      } catch (const std::exception &ex) {
+        applog.error("Error on certificate file, {}", ex.what());
+      }
+    } catch (const std::exception &ex) {
+      applog.error("Error on certificate file, {}", ex.what());
+    }
 
-        applog.info("server listening on 0.0.0.0 port {}", port);
-        co_await stop_signal->wait();
+    try {
+      std::ifstream privatekey_file(privatekey_file_path);
+      if (!privatekey_file.good()) {
+        privatekey_file_path = std::string(std::filesystem::weakly_canonical(
+            std::filesystem::path(cwd.c_str()) / "private.key"));
+      }
+      if (!co_await seastar::file_accessible(privatekey_file_path,
+                                             seastar::access_flags::read)) {
 
-        applog.info("aborting shards...");
-        co_await abort_sources.invoke_on_all(
-            [](seastar::abort_source &as) { as.request_abort(); });
+        applog.error("Error reading privatekey file: {}", privatekey_file_path);
+      }
+    } catch (std::exception_ptr ep) {
+      try {
+        std::rethrow_exception(ep);
+      } catch (const std::exception &ex) {
+        applog.error("Error on privatekey file: {}", ex.what());
+      }
+    } catch (const std::exception &ex) {
+      applog.error("Error on privatekey file: {}", ex.what());
+    }
 
-        applog.info("stopping smp shards...");
-        co_await std::move(shards_future);
+    auto stop_signal = std::make_shared<seastar_apps_lib::stop_signal>();
 
-        applog.info("stopping gates shards ...");
-        co_await gate.invoke_on_all([](seastar::gate &g) { return g.close(); });
+    seastar::sharded<seastar::gate> gate;
+    co_await gate.start();
 
-        applog.info("stopping abort sources...");
-        co_await abort_sources.stop();
-        co_await gate.stop();
+    seastar::sharded<seastar::abort_source> abort_sources;
+    co_await abort_sources.start();
 
-        applog.info("server is exiting...");
-        co_return;
-      });
+    auto shards_future = seastar::smp::invoke_on_all(
+        [port, &abort_sources, &gate, timeout_seconds,
+         email_size_limit = email_size_limit, domain = sstring(domain),
+         certificate = sstring(certificate_file_path),
+         privatekey = sstring(privatekey_file_path)] {
+          return serve(port, abort_sources.local(), gate.local(),
+                       timeout_seconds, email_size_limit, domain, certificate,
+                       privatekey);
+        });
+
+    applog.info("server listening on 0.0.0.0 port {}", port);
+    co_await stop_signal->wait();
+
+    applog.info("aborting shards...");
+    co_await abort_sources.invoke_on_all(
+        [](seastar::abort_source &as) { as.request_abort(); });
+
+    applog.info("stopping smp shards...");
+    co_await std::move(shards_future);
+
+    applog.info("stopping gates shards ...");
+    co_await gate.invoke_on_all([](seastar::gate &g) { return g.close(); });
+
+    applog.info("stopping abort sources...");
+    co_await abort_sources.stop();
+    co_await gate.stop();
+
+    applog.info("server is exiting...");
+    co_return;
+  });
 }
