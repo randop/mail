@@ -390,7 +390,35 @@ constexpr bool compare_strings_ab(const char *a, const std::string &b) {
     ++i;
   }
 
-  return i == b.size();
+  return i == b_size;
+}
+
+constexpr bool compare_strings_view(const std::string_view &a,
+                                    const std::string_view &b) {
+  if (a.size() == 0 || b.size() == 0) {
+    return false;
+  }
+
+  size_t i = 0;
+
+  auto to_lower = [](unsigned char c) constexpr {
+    return static_cast<char>(std::tolower(c));
+  };
+
+  size_t b_size = b.size();
+
+  while (a[i] != '\0' && i < b_size) {
+    if (to_lower(static_cast<unsigned char>(a[i])) !=
+        to_lower(static_cast<unsigned char>(b[i]))) {
+      return false;
+    }
+    if ((i + 1) > b_size) {
+      break;
+    }
+    ++i;
+  }
+
+  return i == b_size;
 }
 
 seastar::future<> handle_connection(
@@ -662,8 +690,8 @@ seastar::future<> handle_connection(
 
               std::string_view check_email = email.substr(email.find("@") + 1);
               for (size_t i = 0; i < email_domains.count; i++) {
-                if (compare_strings_ab(check_email.data(),
-                                       email_domains.domains[i])) {
+                if (compare_strings_view(check_email,
+                                         email_domains.domains[i])) {
                   ok_rcpt_count++;
                   break;
                 }
