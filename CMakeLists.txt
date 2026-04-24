@@ -17,6 +17,37 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT ipo_supported)
+  if(ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+  endif()
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(
+      -O3
+      -march=x86-64
+      -mtune=generic
+      -funroll-loops
+      -fomit-frame-pointer
+      -fno-plt
+      -fvisibility=hidden
+    )
+
+    add_link_options(
+      -Wl,-O1
+      -Wl,--as-needed
+      -Wl,--strip-all
+    )
+  endif()
+
+  # Sanitizes and disables assert(); standard
+  add_compile_definitions(
+    NDEBUG
+  )
+endif()
+
 find_package(Seastar REQUIRED)
 
 add_executable(smtp-server src/main.cpp)
@@ -27,7 +58,6 @@ target_include_directories(smtp-server PRIVATE
     include
 )
 
-# TODO: Defer binary optimizations
 target_compile_options(smtp-server PRIVATE
     -Wall -Wextra
 )

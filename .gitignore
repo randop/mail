@@ -77,6 +77,8 @@ CMakeUserPresets.json
 # self-signed certificates
 cert.pem
 key.pem
+certificate.crt
+private.key
 
 # email files
 *.eml
