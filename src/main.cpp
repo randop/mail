@@ -334,6 +334,22 @@ struct smtp_session {
   }
 };
 
+/// @brief Checks whether a given SMTP command is present in a const char*.
+///
+/// Performs a case-insensitive comparison to determine if the SMTP command
+/// @p a appears within or matches the command string @p b.
+///
+/// @param a  The line to search within.
+///           Must be a valid NUL-terminated C string; must not be `nullptr`.
+/// @param b  The SMTP command to search for (e.g., `"EHLO"`, `"STARTTLS"`).
+///
+/// @return `true`  if @p b is found in @p a (case-insensitively),
+///         `false` otherwise.
+///
+/// @note This function is `constexpr` and may be evaluated at compile time
+///       if both arguments are constant expressions.
+///
+/// @warning Passing `nullptr` for @p a results in undefined behavior.
 constexpr bool has_smtp_command(const char *a, const std::string &b) {
   if (!a) {
     return false;
