@@ -55,6 +55,7 @@ this software will be made available under the specified Change License.
 #include <arpa/inet.h>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -74,16 +75,11 @@ using namespace seastar;
 
 static seastar::logger applog("smtp-server");
 
-struct crlf_result {
-  // line segment exclusive of \r\n
-  std::string_view prefix;
-  bool found = false;
-  size_t bytes_consumed = 0;
-};
+static constexpr std::size_t MAX_EMAIL_DOMAINS = 12;
 
-struct data_delimeter_result {
-  bool found = false;
-  size_t bytes_consumed = 0;
+struct email_domains_t {
+  std::array<seastar::sstring, MAX_EMAIL_DOMAINS> domains;
+  std::size_t count = 0;
 };
 
 struct ip_result {
@@ -130,6 +126,39 @@ struct email_helpers {
     }
 
     return true;
+  }
+
+  static seastar::sstring
+  join_email_domains(const email_domains_t &domains) noexcept {
+    if (domains.count == 0) {
+      return {};
+    }
+
+    constexpr std::string_view separator = ", ";
+    constexpr std::size_t sep_len = 2;
+    const std::size_t n = domains.count;
+
+    std::size_t total_len = sep_len * (n - 1);
+    for (std::size_t i = 0; i < n; ++i) {
+      total_len += domains.domains[i].size();
+    }
+
+    seastar::sstring result;
+    result.resize(total_len);
+
+    char *ptr = result.data();
+
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto &domain = domains.domains[i];
+      std::memcpy(ptr, domain.data(), domain.size());
+      ptr += domain.size();
+      if (i < n - 1) {
+        std::memcpy(ptr, separator.data(), sep_len);
+        ptr += sep_len;
+      }
+    }
+
+    return result;
   }
 };
 
@@ -784,6 +813,43 @@ seastar::future<> serve(uint16_t port, seastar::abort_source &as,
   applog.info("shard {} stopped", seastar::this_shard_id());
 }
 
+email_domains_t
+load_email_domains(const seastar::sstring &default_email_domain) {
+  email_domains_t result;
+  const char *env = std::getenv("MAIL_EMAIL_DOMAINS");
+
+  if (!env || env[0] == '\0') {
+    result.domains[0] = default_email_domain;
+    result.count = 1;
+    return result;
+  }
+
+  seastar::sstring raw(env);
+  std::size_t start = 0;
+  std::size_t pos;
+
+  while ((pos = raw.find(',', start)) != seastar::sstring::npos &&
+         result.count < MAX_EMAIL_DOMAINS) {
+    auto token = raw.substr(start, pos - start);
+    if (!token.empty())
+      result.domains[result.count++] = std::move(token);
+    start = pos + 1;
+  }
+
+  if (result.count < MAX_EMAIL_DOMAINS) {
+    auto tail = raw.substr(start);
+    if (!tail.empty())
+      result.domains[result.count++] = std::move(tail);
+  }
+
+  if (result.count == 0) {
+    result.domains[0] = default_email_domain;
+    result.count = 1;
+  }
+
+  return result;
+}
+
 int main(int argc, char **argv) {
   char **it = std::find_if(argv, argv + argc, [](const char *arg) {
     return std::string_view(arg) == "--version";
@@ -819,7 +885,9 @@ int main(int argc, char **argv) {
     applog.info("mail version {}", PROJECT_VERSION);
 
     // TODO: Load domain configuration
-    const seastar::sstring domain = "maildomain.ngo";
+    const sstring domain = "maildomain.ngo";
+    const sstring email_domain = "maildomain.ngo";
+
     size_t email_size_limit = 524288; // 512KB
     uint16_t port = app.configuration()["port"].as<uint16_t>();
     uint32_t timeout_seconds = app.configuration()["timeout"].as<uint32_t>();
@@ -830,6 +898,10 @@ int main(int argc, char **argv) {
     sstring cwd = std::filesystem::current_path().string();
 
     applog.info("Using smtp domain as: {}", domain);
+
+    auto email_domains_result = load_email_domains(domain);
+    applog.info("Email domains: {}",
+                email_helpers::join_email_domains(email_domains_result));
 
     try {
       std::ifstream certificate_file(certificate_file_path);
