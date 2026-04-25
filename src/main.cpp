@@ -140,10 +140,15 @@ seastar::future<> handle_connection(
     seastar::connected_socket cs, seastar::socket_address remote,
     uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
     shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
-    const seastar::sstring domain, const email_domains_t email_domains) {
+    const seastar::sstring domain,
+    seastar::lw_shared_ptr<email_domains_t> all_email_domains,
+    const seastar::sstring email_domain, const seastar::sstring datadirectory) {
+
   auto [ip, ec] = ip_helpers::get_ip_address(remote);
-  seastar::sstring email_filename = generate_email_filename();
-  applog.info("New client {} connection, session: {}", ip, email_filename);
+  std::string sep(1, std::filesystem::path::preferred_separator);
+  seastar::sstring email_filename =
+      datadirectory + sep + generate_email_filename();
+  applog.info("New client {} connection, session: {}", remote, email_filename);
 
   std::unique_ptr<smtp_session> session;
 
@@ -172,10 +177,13 @@ seastar::future<> handle_connection(
   uint8_t ok_rcpt_count = 0;
   uint8_t ok_mailfrom_count = 0;
 
+  bool state_data_started = false;
+  bool state_data_ended = false;
+
   gate.enter();
 
   try {
-    auto log_filename = generate_random_logname();
+    sstring log_filename = datadirectory + sep + generate_random_logname();
 
     seastar::file logfile = co_await open_file_dma(
         log_filename,
@@ -235,7 +243,7 @@ seastar::future<> handle_connection(
       }
 
       if (in_data) {
-        applog.info("IN DATA MODE...");
+        applog.trace("IN DATA MODE...");
         data_size += buf.size();
         if (data_size > email_size_limit) {
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
@@ -250,6 +258,7 @@ seastar::future<> handle_connection(
             in_data = false;
             in_command = true;
             is_data_ended = true;
+            state_data_ended = true;
             co_await session->send("250 OK: message queued\r\n");
           }
           data_pos = data_buffer.size();
@@ -265,6 +274,7 @@ seastar::future<> handle_connection(
               in_data = false;
               in_command = true;
               is_data_ended = true;
+              state_data_ended = true;
               co_await session->send("250 OK: message queued\r\n");
             }
           }
@@ -294,22 +304,22 @@ seastar::future<> handle_connection(
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "EHLO") ||
                 compare_strings_ab(p, "HELO")) {
-              applog.info("EHLO / HELO found at {}", cmd_pos);
+              applog.trace("EHLO / HELO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
             } else if (compare_strings_ab(p, "QUIT")) {
-              applog.info("QUIT found at {}", cmd_pos);
+              applog.trace("QUIT found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
             } else if (compare_strings_ab(p, "AUTH")) {
-              applog.info("AUTH found at {}", cmd_pos);
+              applog.trace("AUTH found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
             } else if (compare_strings_ab(p, "DATA")) {
-              applog.info("DATA found at {}", cmd_pos);
+              applog.trace("DATA found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_command = false;
               in_data = true;
@@ -320,13 +330,13 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 8) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "RCPT TO:")) {
-              applog.info("RCPT TO found at {}", cmd_pos);
+              applog.trace("RCPT TO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
             }
             if (compare_strings_ab(p, "STARTTLS")) {
-              applog.info("STARTTLS found at {}", cmd_pos);
+              applog.trace("STARTTLS found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
@@ -335,7 +345,7 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 10) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "MAIL FROM:")) {
-              applog.info("MAIL FROM found at {}", cmd_pos);
+              applog.trace("MAIL FROM found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 10;
@@ -349,7 +359,7 @@ seastar::future<> handle_connection(
           while (crlf_pos + 1 < cmd_buffer.size()) {
             if (cmd_buffer[crlf_pos] == '\r' &&
                 cmd_buffer[crlf_pos + 1] == '\n') {
-              applog.info("<CRLF> found at {}", crlf_pos);
+              applog.trace("<CRLF> found at {}", crlf_pos);
               crlf_pos += 2;
               in_command = true;
               in_crlf = true;
@@ -369,13 +379,13 @@ seastar::future<> handle_connection(
         } else {
           // clear
           cmd_view = std::string_view(cmd_buffer.data(), 0);
-          applog.info("clear cmd_view: {}", cmd_view);
+          applog.trace("clear cmd_view: {}", cmd_view);
         }
 
         if (in_command && in_crlf) {
           cmd_pos = crlf_pos;
           cmd_start_index = cmd_pos;
-          applog.info("command: {}", cmd_view);
+          applog.trace("command: {}", cmd_view);
 
           if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
             ok_rcpt_count = 0;
@@ -403,10 +413,11 @@ seastar::future<> handle_connection(
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
 
-              std::string_view check_email = email.substr(email.find("@") + 1);
-              for (size_t i = 0; i < email_domains.count; i++) {
+              std::string_view check_email = email_helpers::get_domain(email);
+
+              for (size_t i = 0; i < all_email_domains->count; i++) {
                 if (compare_string_views(check_email,
-                                         email_domains.domains[i])) {
+                                         all_email_domains->domains[i])) {
                   ok_rcpt_count++;
                   break;
                 }
@@ -431,6 +442,7 @@ seastar::future<> handle_connection(
             if (ok_rcpt_count >= 1 && ok_mailfrom_count >= 1) {
               in_data = true;
               in_command = false;
+              state_data_started = true;
               co_await session->send(
                   "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
             } else {
@@ -460,7 +472,7 @@ seastar::future<> handle_connection(
 
     // final tail (pad once)
     if (!email_buffer.empty()) {
-      applog.info("DMA_WRITE: email remnant <{}>", email_filename);
+      applog.trace("DMA_WRITE: email remnant <{}>", email_filename);
       size_t padded =
           (email_buffer.size() + emailfile_align - 1) & ~(emailfile_align - 1);
 
@@ -476,8 +488,13 @@ seastar::future<> handle_connection(
 
     co_await emailfile.flush();
 
-    applog.info("Writing client {} logs on {} and email file: {}", remote,
-                log_filename, email_filename);
+    if (state_data_started && state_data_ended) {
+      applog.info("Writing client {} logs on {} and email file: {}", remote,
+                  log_filename, email_filename);
+    } else {
+      applog.warn("Email transaction failure {} on client {}", log_filename,
+                  remote);
+    }
   } catch (const seastar::timed_out_error &err) {
     applog.info("Client {} idle timeout", remote);
   } catch (const std::exception &ex) {
@@ -508,10 +525,13 @@ seastar::future<>
 serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       uint32_t timeout_seconds, const size_t email_size_limit,
       const seastar::sstring domain, const seastar::sstring certificate,
-      const seastar::sstring privatekey, const email_domains_t email_domains) {
-  /*
-  applog.info("Loading X.509 certificates... {} , {}", certificate, privatekey);
-  */
+      const seastar::sstring privatekey,
+      seastar::lw_shared_ptr<email_domains_t> all_email_domains,
+      const seastar::sstring email_domain,
+      const seastar::sstring datadirectory) {
+
+  applog.trace("Loading X.509 certificates... {} , {}", certificate,
+               privatekey);
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file(certificate, privatekey,
                                     tls::x509_crt_format::PEM);
@@ -548,7 +568,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
                               gate, as, certs, email_size_limit, domain,
-                              email_domains)
+                              all_email_domains, email_domain, datadirectory)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
@@ -804,7 +824,7 @@ int main(int argc, char **argv) {
   return app.run(
       argc, argv,
       [&app, domain_data = std::move(domain),
-       email_data = std::move(email_domain),
+       email_data = std::move(email_domain), datadir = std::move(datadirectory),
        certificate_file_path = std::move(certificate),
        privatekey_file_path = std::move(privatekey)]() -> seastar::future<> {
         auto &cfg = app.configuration();
@@ -815,6 +835,8 @@ int main(int argc, char **argv) {
 
         sstring domain = sstring(domain_data);
         sstring email_domain = sstring(email_data);
+
+        sstring datadirectory = sstring(datadir);
 
         sstring certificate = sstring(certificate_file_path);
         sstring privatekey = sstring(privatekey_file_path);
@@ -834,13 +856,18 @@ int main(int argc, char **argv) {
         seastar::sharded<seastar::abort_source> abort_sources;
         co_await abort_sources.start();
 
+        seastar::lw_shared_ptr<email_domains_t> all_email_domains =
+            seastar::make_lw_shared<email_domains_t>(email_domains_result);
+
         auto shards_future = seastar::smp::invoke_on_all(
             [port, &abort_sources, &gate, timeout_seconds,
              email_size_limit = email_size_limit, domain = sstring(domain),
-             certificate, privatekey, email_domains = email_domains_result] {
+             datadirectory, certificate, privatekey, email_domain,
+             all_email_domains] {
               return serve(port, abort_sources.local(), gate.local(),
                            timeout_seconds, email_size_limit, domain,
-                           certificate, privatekey, email_domains);
+                           certificate, privatekey, all_email_domains,
+                           email_domain, datadirectory);
             });
 
         applog.info("server listening on 0.0.0.0 port {}", port);

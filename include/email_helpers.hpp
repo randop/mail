@@ -24,6 +24,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 static constexpr std::size_t MAX_EMAIL_DOMAINS = 12;
 
@@ -51,4 +52,14 @@ seastar::sstring join_email_domains(const email_domains_t &domains) noexcept;
 
 email_domains_t
 load_email_domains(const seastar::sstring &default_email_domain);
+
+std::string_view trim(std::string_view v);
+
+std::vector<seastar::sstring> split_and_trim(const seastar::sstring &input);
+
+email_domains_t split_email_domains(const seastar::sstring &all_email_domain,
+                                    const seastar::sstring &email_domain);
+
+std::string_view get_domain(std::string_view email);
+
 } // namespace email_helpers

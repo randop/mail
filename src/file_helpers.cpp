@@ -50,7 +50,7 @@ std::errc check_data_directory(const std::string &data_directory) {
     return std::errc::is_a_directory;
   }
 
-  std::string filename = ".test" + uuid_helpers::generate_v7() + ".tmp";
+  std::string filename = ".test-" + uuid_helpers::generate_v7() + ".tmp";
 
   auto test_file = path / filename;
 

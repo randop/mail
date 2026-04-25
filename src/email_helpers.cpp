@@ -144,4 +144,76 @@ email_extract_result extract_email_address(std::string_view sv) {
   return {"", std::errc::result_out_of_range};
 }
 
+std::string_view trim(std::string_view v) {
+  auto is_space = [](char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+  };
+
+  while (!v.empty() && is_space(v.front())) {
+    v.remove_prefix(1);
+  }
+
+  while (!v.empty() && is_space(v.back())) {
+    v.remove_suffix(1);
+  }
+
+  return v;
+}
+
+std::vector<seastar::sstring> split_and_trim(const seastar::sstring &input) {
+  std::vector<seastar::sstring> out;
+
+  std::string_view sv(input);
+
+  while (!sv.empty()) {
+    size_t pos = sv.find(',');
+
+    std::string_view token =
+        (pos == std::string_view::npos) ? sv : sv.substr(0, pos);
+
+    token = trim(token);
+
+    if (!token.empty()) {
+      out.emplace_back(token);
+    }
+
+    if (pos == std::string_view::npos) {
+      break;
+    }
+
+    sv.remove_prefix(pos + 1);
+  }
+
+  return out;
+}
+
+email_domains_t split_email_domains(const seastar::sstring &all_email_domains,
+                                    const seastar::sstring &email_domain) {
+  email_domains_t result;
+
+  auto parts = split_and_trim(all_email_domains);
+
+  if (parts.size() == 0) {
+    result.domains[0] = email_domain;
+    result.count = 1;
+    return result;
+  }
+
+  result.count = 0;
+  for (auto &x : parts) {
+    result.domains[result.count] = x;
+    result.count++;
+  }
+
+  return result;
+}
+
+std::string_view get_domain(std::string_view email) {
+  size_t pos = email.find('@');
+  if (pos == std::string_view::npos || pos + 1 >= email.size()) {
+    return {};
+  }
+  return email.substr(pos + 1);
+}
+
 }; // namespace email_helpers
