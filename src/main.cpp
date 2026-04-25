@@ -509,7 +509,9 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       uint32_t timeout_seconds, const size_t email_size_limit,
       const seastar::sstring domain, const seastar::sstring certificate,
       const seastar::sstring privatekey, const email_domains_t email_domains) {
+  /*
   applog.info("Loading X.509 certificates... {} , {}", certificate, privatekey);
+  */
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file(certificate, privatekey,
                                     tls::x509_crt_format::PEM);
@@ -581,6 +583,7 @@ int main(int argc, char **argv) {
     return EXIT_SUCCESS;
   }
 
+  applog.info("mail version {}", PROJECT_VERSION);
   const std::span<char *const> args{argv, static_cast<std::size_t>(argc)};
 
   std::vector<std::string> args_vector;
@@ -597,6 +600,7 @@ int main(int argc, char **argv) {
     argv_clone.push_back(s.data());
   }
 
+  // TODO: Load performance tuning from configuration
   seastar::app_template::seastar_options opts;
   opts.smp_opts.memory.set_value("64M");
 
@@ -771,6 +775,30 @@ int main(int argc, char **argv) {
     applog.error("Error processing program options: {}", ex.what());
   }
 
+  std::string datadirectory = "/var/spool/smtp";
+  bool datadir_ok = false;
+
+  try {
+    datadirectory = std::string(std::filesystem::weakly_canonical(
+        std::filesystem::path(povm["datadir"].as<sstring>())));
+
+    std::errc dir_ec = file_helpers::check_data_directory(datadirectory);
+    if (dir_ec == std::errc()) {
+      datadir_ok = true;
+    } else {
+      applog.error("data directory error");
+    }
+
+  } catch (const std::exception &ex) {
+    applog.error("Error on data directory: {}", ex.what());
+  }
+
+  if (!datadir_ok) {
+    applog.error(
+        "[CRITICAL!!!] Terminating service due to data directory error.");
+    return EXIT_FAILURE;
+  }
+
   app.get_options_description().add(desc);
 
   return app.run(
@@ -779,8 +807,6 @@ int main(int argc, char **argv) {
        email_data = std::move(email_domain),
        certificate_file_path = std::move(certificate),
        privatekey_file_path = std::move(privatekey)]() -> seastar::future<> {
-        applog.info("mail version {}", PROJECT_VERSION);
-
         auto &cfg = app.configuration();
 
         size_t email_size_limit = 524288; // 512KB

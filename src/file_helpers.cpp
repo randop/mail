@@ -39,4 +39,35 @@ seastar::sstring generate_email_filename() {
   return out;
 }
 
+std::errc check_data_directory(const std::string &data_directory) {
+  auto path = std::filesystem::path(data_directory);
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) || ec) {
+    return std::errc::no_such_file_or_directory;
+  }
+
+  if (!std::filesystem::is_directory(path, ec) || ec) {
+    return std::errc::is_a_directory;
+  }
+
+  std::string filename = ".test" + uuid_helpers::generate_v7() + ".tmp";
+
+  auto test_file = path / filename;
+
+  std::ofstream f(test_file, std::ios::out | std::ios::trunc);
+  if (!f.is_open()) {
+    return std::errc::permission_denied;
+  }
+
+  f << "ok";
+  f.close();
+
+  std::filesystem::remove(test_file, ec);
+  if (ec) {
+    return std::errc::permission_denied;
+  }
+
+  return std::errc();
+}
+
 } // namespace file_helpers
