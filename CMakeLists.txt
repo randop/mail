@@ -54,7 +54,9 @@ find_package(OpenSSL REQUIRED)
 add_executable(smtp-server 
   src/main.cpp
   src/email_helpers.cpp
+  src/file_helpers.cpp
   src/x509_helpers.cpp
+  src/uuid_helpers.cpp
 )
 
 target_link_libraries(smtp-server PRIVATE Seastar::seastar)

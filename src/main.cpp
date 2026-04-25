@@ -77,7 +77,9 @@ this software will be made available under the specified Change License.
 #include <utility>
 
 #include "email_helpers.hpp"
+#include "file_helpers.hpp"
 #include "stop_signal.hh"
+#include "uuid_helpers.hpp"
 #include "x509_helpers.hpp"
 
 #define EXIT_SUCCESS 0
@@ -91,99 +93,6 @@ struct ip_result {
   char ip[INET6_ADDRSTRLEN];
   std::errc ec;
 };
-
-struct uuidv7 {
-  static seastar::sstring generate() {
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      lowres_system_clock::now().time_since_epoch())
-                      .count();
-    thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<uint64_t> dist;
-
-    uint8_t b[16];
-    uint64_t ts = static_cast<uint64_t>(now_ms);
-    b[0] = static_cast<uint8_t>((ts >> 40) & 0xff);
-    b[1] = static_cast<uint8_t>((ts >> 32) & 0xff);
-    b[2] = static_cast<uint8_t>((ts >> 24) & 0xff);
-    b[3] = static_cast<uint8_t>((ts >> 16) & 0xff);
-    b[4] = static_cast<uint8_t>((ts >> 8) & 0xff);
-    b[5] = static_cast<uint8_t>(ts & 0xff);
-
-    uint64_t rand_a = dist(rng);
-    uint64_t rand_b = dist(rng);
-    b[6] = static_cast<uint8_t>((rand_a >> 56) & 0x0f) | 0x70;
-    b[7] = static_cast<uint8_t>((rand_a >> 48) & 0xff);
-    b[8] = static_cast<uint8_t>((rand_a >> 40) & 0x3f) | 0x80;
-    b[9] = static_cast<uint8_t>((rand_a >> 32) & 0xff);
-    b[10] = static_cast<uint8_t>((rand_a >> 24) & 0xff);
-    b[11] = static_cast<uint8_t>((rand_a >> 16) & 0xff);
-    b[12] = static_cast<uint8_t>((rand_a >> 8) & 0xff);
-    b[13] = static_cast<uint8_t>(rand_a & 0xff);
-    b[14] = static_cast<uint8_t>((rand_b >> 56) & 0xff);
-    b[15] = static_cast<uint8_t>((rand_b >> 48) & 0xff);
-
-    static const char hex[] = "0123456789abcdef";
-    sstring out{sstring::initialized_later(), 36};
-    auto *p = out.data();
-    for (int i = 0; i < 4; ++i) {
-      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
-    }
-    *p++ = '-';
-    for (int i = 4; i < 6; ++i) {
-      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
-    }
-    *p++ = '-';
-    for (int i = 6; i < 8; ++i) {
-      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
-    }
-    *p++ = '-';
-    for (int i = 8; i < 10; ++i) {
-      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
-    }
-    *p++ = '-';
-    for (int i = 10; i < 16; ++i) {
-      *p++ = hex[b[i] >> 4], *p++ = hex[b[i] & 0xf];
-    }
-    return out;
-  }
-};
-
-seastar::sstring generate_random_logname() {
-  seastar::sstring out{sstring::initialized_later(), 45};
-  auto *p = out.data();
-  *p++ = 's';
-  *p++ = 'm';
-  *p++ = 't';
-  *p++ = 'p';
-  *p++ = '-';
-  seastar::sstring random_uuid = uuidv7::generate();
-  for (char c : random_uuid) {
-    if (c != '\n') {
-      *p++ = c;
-    }
-  }
-  *p++ = '.';
-  *p++ = 'l';
-  *p++ = 'o';
-  *p++ = 'g';
-  return out;
-}
-
-seastar::sstring generate_email_filename() {
-  seastar::sstring out{sstring::initialized_later(), 40};
-  auto *p = out.data();
-  seastar::sstring random_uuid = uuidv7::generate();
-  for (char c : random_uuid) {
-    if (c != '\n') {
-      *p++ = c;
-    }
-  }
-  *p++ = '.';
-  *p++ = 'e';
-  *p++ = 'm';
-  *p++ = 'l';
-  return out;
-}
 
 ip_result get_ip_address(seastar::socket_address &remote) {
   const char *res = nullptr;
@@ -326,7 +235,7 @@ seastar::future<> handle_connection(
     shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
     const seastar::sstring domain, const email_domains_t email_domains) {
   auto [ip, ec] = get_ip_address(remote);
-  seastar::sstring email_filename = generate_email_filename();
+  seastar::sstring email_filename = file_helpers::generate_email_filename();
   applog.info("New client {} connection, session: {}", ip, email_filename);
 
   std::unique_ptr<smtp_session> session;
@@ -359,7 +268,7 @@ seastar::future<> handle_connection(
   gate.enter();
 
   try {
-    auto log_filename = generate_random_logname();
+    auto log_filename = file_helpers::generate_random_logname();
 
     seastar::file logfile = co_await open_file_dma(
         log_filename,
