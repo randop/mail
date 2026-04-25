@@ -41,6 +41,7 @@ this software will be made available under the specified Change License.
 #include <seastar/core/queue.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
+#include <seastar/core/semaphore.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sleep.hh>
@@ -280,9 +281,15 @@ seastar::future<> handle_connection(
           }
         }
 
-        email_buffer.append(buf.get(), buf.size());
+        if (is_data_ended) {
+          // trim to remove <CRLF>.<CRLF>
+          email_buffer.append(buf.get(), buf.size() - 5);
+        } else {
+          email_buffer.append(buf.get(), buf.size());
+        }
+
         if (email_buffer.size() >= emailfile_align) {
-          applog.info("DMA_WRITE: email content <{}>", email_filename);
+          applog.trace("DMA_WRITE: email content <{}>", email_filename);
           size_t to_write = email_buffer.size() & ~(emailfile_align - 1);
 
           seastar::temporary_buffer<char> out(to_write);
@@ -414,12 +421,16 @@ seastar::future<> handle_connection(
               co_await session->send("250 Accepted\r\n");
 
               std::string_view check_email = email_helpers::get_domain(email);
-
-              for (size_t i = 0; i < all_email_domains->count; i++) {
-                if (compare_string_views(check_email,
-                                         all_email_domains->domains[i])) {
-                  ok_rcpt_count++;
-                  break;
+              if (all_email_domains->count == 1 &&
+                  compare_string_views(check_email, email_domain)) {
+                ok_rcpt_count++;
+              } else {
+                for (size_t i = 0; i < all_email_domains->count; i++) {
+                  if (compare_string_views(check_email,
+                                           all_email_domains->domains[i])) {
+                    ok_rcpt_count++;
+                    break;
+                  }
                 }
               }
 
@@ -470,20 +481,23 @@ seastar::future<> handle_connection(
       }
     }
 
-    // final tail (pad once)
     if (!email_buffer.empty()) {
-      applog.trace("DMA_WRITE: email remnant <{}>", email_filename);
-      size_t padded =
-          (email_buffer.size() + emailfile_align - 1) & ~(emailfile_align - 1);
-
-      seastar::temporary_buffer<char> out(padded);
-
-      memcpy(out.get_write(), email_buffer.data(), email_buffer.size());
-      memset(out.get_write() + email_buffer.size(), 0,
-             padded - email_buffer.size());
-
-      co_await emailfile.dma_write(email_pos, out.get(), padded);
-      email_pos += padded;
+      bool pad_zeros = false;
+      applog.trace("DMA_WRITE: email data remnant <{}>", email_filename);
+      if (pad_zeros) {
+        size_t padded = (email_buffer.size() + emailfile_align - 1) &
+                        ~(emailfile_align - 1);
+        seastar::temporary_buffer<char> out(padded);
+        memcpy(out.get_write(), email_buffer.data(), email_buffer.size());
+        memset(out.get_write() + email_buffer.size(), 0,
+               padded - email_buffer.size());
+        co_await emailfile.dma_write(email_pos, out.get(), padded);
+        email_pos += padded;
+      } else {
+        co_await emailfile.dma_write(email_pos, email_buffer.data(),
+                                     email_buffer.size());
+        email_pos += email_buffer.size();
+      }
     }
 
     co_await emailfile.flush();
@@ -561,9 +575,15 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
     ss.abort_accept();
   });
 
+  // TODO: Load concurrent connection limit from configuration
+  seastar::semaphore connect_semaphore(24);
+
   while (!as.abort_requested()) {
     try {
       auto ar = co_await ss.accept();
+
+      co_await connect_semaphore.wait();
+
       auto addr = ar.remote_address;
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
@@ -576,9 +596,10 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
               applog.error("Error closing connections: {}", ex.what());
             }
           })
-          .finally([&gate, &connection_count] {
+          .finally([&gate, &connection_count, &connect_semaphore] {
+            connect_semaphore.signal();
             connection_count--;
-            applog.info("Finally closing connections...");
+            applog.trace("Finally closing connections...");
           });
     } catch (const seastar::abort_requested_exception &) {
       break;
