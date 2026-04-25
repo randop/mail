@@ -55,6 +55,7 @@ add_executable(smtp-server
   src/main.cpp
   src/email_helpers.cpp
   src/file_helpers.cpp
+  src/ip_helpers.cpp
   src/x509_helpers.cpp
   src/uuid_helpers.cpp
 )

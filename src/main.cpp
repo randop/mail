@@ -53,7 +53,6 @@ this software will be made available under the specified Change License.
 #include <seastar/util/tmp_file.hh>
 
 #include <algorithm>
-#include <arpa/inet.h>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -78,6 +77,7 @@ this software will be made available under the specified Change License.
 
 #include "email_helpers.hpp"
 #include "file_helpers.hpp"
+#include "ip_helpers.hpp"
 #include "stop_signal.hh"
 #include "uuid_helpers.hpp"
 #include "x509_helpers.hpp"
@@ -88,38 +88,6 @@ this software will be made available under the specified Change License.
 using namespace seastar;
 
 static seastar::logger applog("smtp-server");
-
-struct ip_result {
-  char ip[INET6_ADDRSTRLEN];
-  std::errc ec;
-};
-
-ip_result get_ip_address(seastar::socket_address &remote) {
-  const char *res = nullptr;
-  ip_result result;
-
-  std::strncpy(result.ip, "172.17.0.1", sizeof(result.ip) - 1);
-  result.ip[sizeof(result.ip) - 1] = '\0';
-  result.ec = std::errc::bad_address;
-
-  const sockaddr &sa = remote.as_posix_sockaddr();
-
-  if (sa.sa_family == AF_INET) {
-    res =
-        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in &>(sa).sin_addr,
-                  result.ip, sizeof(result.ip));
-  } else {
-    res = inet_ntop(AF_INET6,
-                    &reinterpret_cast<const sockaddr_in6 &>(sa).sin6_addr,
-                    result.ip, sizeof(result.ip));
-  }
-
-  if (res) {
-    result.ec = std::errc{};
-  }
-
-  return result;
-}
 
 struct smtp_session {
   connected_socket cs;
@@ -234,7 +202,7 @@ seastar::future<> handle_connection(
     uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
     shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
     const seastar::sstring domain, const email_domains_t email_domains) {
-  auto [ip, ec] = get_ip_address(remote);
+  auto [ip, ec] = ip_helpers::get_ip_address(remote);
   seastar::sstring email_filename = file_helpers::generate_email_filename();
   applog.info("New client {} connection, session: {}", ip, email_filename);
 
