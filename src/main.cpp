@@ -147,8 +147,8 @@ seastar::future<> handle_connection(
 
   auto [ip, ec] = ip_helpers::get_ip_address(remote);
   std::string sep(1, std::filesystem::path::preferred_separator);
-  seastar::sstring email_filename =
-      datadirectory + sep + generate_email_filename();
+  sstring email_real_filename = generate_email_filename();
+  seastar::sstring email_filename = datadirectory + sep + email_real_filename;
   applog.info("New client {} connection, session: {}", remote, email_filename);
 
   std::unique_ptr<smtp_session> session;
@@ -237,6 +237,13 @@ seastar::future<> handle_connection(
                        std::chrono::seconds(timeout_seconds));
 
       if (!in_data) {
+        if ((cmd_buffer.size() + buf.size()) > SMTP_COMMAND_BUFFER_LIMIT_SIZE) {
+          active = false;
+          applog.error("Client {} exceeded command buffer limit", remote);
+          co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
+          break;
+        }
+
         cmd_buffer.append(buf.get(), buf.size());
         if (session->logfile) {
           co_await session->logfile->write(buf.get(), buf.size());
@@ -526,6 +533,18 @@ seastar::future<> handle_connection(
     co_await session->close();
   } catch (...) {
     // void
+  }
+
+  // TODO: Check configuration
+  bool maildir_support = true;
+  if (maildir_support) {
+    std::filesystem::path source_email(email_filename);
+    std::filesystem::path target_email(datadirectory + sep + "maildir" + sep +
+                                       "new" + sep + email_real_filename);
+    if (!file_helpers::move_file_safe(source_email, target_email)) {
+      applog.error("Maildir error moving {} to {}", source_email.string(),
+                   target_email.string());
+    }
   }
 
   applog.info("Client {} connection finished", remote);

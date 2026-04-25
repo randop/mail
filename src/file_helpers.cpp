@@ -67,7 +67,46 @@ std::errc check_data_directory(const std::string &data_directory) {
     return std::errc::permission_denied;
   }
 
+  std::string sep(1, std::filesystem::path::preferred_separator);
+  auto maildir_path =
+      std::filesystem::path(data_directory + sep + "maildir" + sep + "cur");
+  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
+    return std::errc::permission_denied;
+  }
+
+  maildir_path =
+      std::filesystem::path(data_directory + sep + "maildir" + sep + "new");
+  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
+    return std::errc::permission_denied;
+  }
+
+  maildir_path =
+      std::filesystem::path(data_directory + sep + "maildir" + sep + "tmp");
+  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
+    return std::errc::permission_denied;
+  }
+
   return std::errc();
+}
+
+bool move_file_safe(const std::filesystem::path &from,
+                    const std::filesystem::path &to) noexcept {
+  std::error_code ec;
+  namespace fs = std::filesystem;
+  fs::rename(from, to, ec);
+  if (!ec) {
+    return true;
+  }
+
+  ec.clear();
+
+  fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+  if (ec) {
+    return false;
+  }
+
+  fs::remove(from, ec);
+  return !ec;
 }
 
 } // namespace file_helpers

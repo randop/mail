@@ -20,4 +20,7 @@ seastar::sstring generate_email_filename();
 
 std::errc check_data_directory(const std::string &path);
 
+bool move_file_safe(const std::filesystem::path &from,
+                    const std::filesystem::path &to) noexcept;
+
 } // namespace file_helpers
