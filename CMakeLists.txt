@@ -49,10 +49,20 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 find_package(Seastar REQUIRED)
+find_package(OpenSSL REQUIRED)
 
-add_executable(smtp-server src/main.cpp)
+add_executable(smtp-server 
+  src/main.cpp
+  src/email_helpers.cpp
+  src/x509_helpers.cpp
+)
 
 target_link_libraries(smtp-server PRIVATE Seastar::seastar)
+target_link_libraries(smtp-server
+  PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
 
 target_include_directories(smtp-server PRIVATE
     include

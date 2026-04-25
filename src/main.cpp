@@ -37,10 +37,13 @@ this software will be made available under the specified Change License.
 #include <seastar/core/future-util.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/queue.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/sleep.hh>
+#include <seastar/core/smp.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/timer-set.hh>
 #include <seastar/net/api.hh>
@@ -49,24 +52,33 @@ this software will be made available under the specified Change License.
 #include <seastar/util/log.hh>
 #include <seastar/util/tmp_file.hh>
 
-#include "stop_signal.hh"
-
 #include <algorithm>
 #include <arpa/inet.h>
+#include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <format>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+
+#include "email_helpers.hpp"
+#include "stop_signal.hh"
+#include "x509_helpers.hpp"
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -75,123 +87,10 @@ using namespace seastar;
 
 static seastar::logger applog("smtp-server");
 
-static constexpr std::size_t MAX_EMAIL_DOMAINS = 12;
-
-struct email_domains_t {
-  std::array<seastar::sstring, MAX_EMAIL_DOMAINS> domains;
-  std::size_t count = 0;
-};
-
 struct ip_result {
   char ip[INET6_ADDRSTRLEN];
   std::errc ec;
 };
-
-struct email_extract_result {
-  seastar::sstring email;
-  std::errc ec{};
-};
-
-struct email_helpers {
-  static inline bool is_atext(char c) noexcept {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '.' ||
-           c == '_' || c == '%' || c == '+' || c == '-';
-  }
-
-  static inline bool is_domain_char(char c) noexcept {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-';
-  }
-
-  static bool validate_email(std::string_view v) noexcept {
-    auto at = v.find('@');
-    if (at == std::string_view::npos || at == 0 || at == v.size() - 1)
-      return false;
-
-    auto local = v.substr(0, at);
-    auto domain = v.substr(at + 1);
-
-    // local-part
-    for (char c : local) {
-      if (!is_atext(c))
-        return false;
-    }
-
-    // domain must contain at least one dot
-    if (domain.find('.') == std::string_view::npos)
-      return false;
-
-    for (char c : domain) {
-      if (!is_domain_char(c))
-        return false;
-    }
-
-    return true;
-  }
-
-  static seastar::sstring
-  join_email_domains(const email_domains_t &domains) noexcept {
-    if (domains.count == 0) {
-      return {};
-    }
-
-    constexpr std::string_view separator = ", ";
-    constexpr std::size_t sep_len = 2;
-    const std::size_t n = domains.count;
-
-    std::size_t total_len = sep_len * (n - 1);
-    for (std::size_t i = 0; i < n; ++i) {
-      total_len += domains.domains[i].size();
-    }
-
-    seastar::sstring result;
-    result.resize(total_len);
-
-    char *ptr = result.data();
-
-    for (std::size_t i = 0; i < n; ++i) {
-      const auto &domain = domains.domains[i];
-      std::memcpy(ptr, domain.data(), domain.size());
-      ptr += domain.size();
-      if (i < n - 1) {
-        std::memcpy(ptr, separator.data(), sep_len);
-        ptr += sep_len;
-      }
-    }
-
-    return result;
-  }
-};
-
-email_extract_result extract_email_address(std::string_view sv) {
-  if (auto l = sv.find('<'); l != std::string_view::npos) {
-    if (auto r = sv.find('>', l + 1); r != std::string_view::npos) {
-      auto candidate = sv.substr(l + 1, r - (l + 1));
-      if (email_helpers::validate_email(candidate)) {
-        return {seastar::sstring(candidate), {}};
-      }
-      return {"", std::errc::invalid_argument};
-    }
-  }
-
-  for (size_t i = 0; i < sv.size(); ++i) {
-    if (sv[i] == '@') {
-      size_t start = i;
-      while (start > 0 && email_helpers::is_atext(sv[start - 1]))
-        --start;
-
-      size_t end = i + 1;
-      while (end < sv.size() && email_helpers::is_domain_char(sv[end]))
-        ++end;
-
-      auto candidate = sv.substr(start, end - start);
-      if (email_helpers::validate_email(candidate)) {
-        return {seastar::sstring(candidate), {}};
-      }
-    }
-  }
-
-  return {"", std::errc::result_out_of_range};
-}
 
 struct uuidv7 {
   static seastar::sstring generate() {
@@ -684,7 +583,7 @@ seastar::future<> handle_connection(
                 std::format("250 SIZE {}\r\n", email_size_limit)));
             co_await session->out->flush();
           } else if (cmd_view.starts_with("RCPT TO:")) {
-            auto [email, ec] = extract_email_address(cmd_view);
+            auto [email, ec] = email_helpers::extract_email_address(cmd_view);
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
 
@@ -701,7 +600,7 @@ seastar::future<> handle_connection(
               co_await session->send("553 5.1.3 Bad email address syntax\r\n");
             }
           } else if (cmd_view.starts_with("MAIL FROM:")) {
-            auto [email, ec] = extract_email_address(cmd_view);
+            auto [email, ec] = email_helpers::extract_email_address(cmd_view);
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
               ok_mailfrom_count++;
@@ -856,43 +755,6 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
   applog.info("shard {} stopped", seastar::this_shard_id());
 }
 
-email_domains_t
-load_email_domains(const seastar::sstring &default_email_domain) {
-  email_domains_t result;
-  const char *env = std::getenv("MAIL_EMAIL_DOMAINS");
-
-  if (!env || env[0] == '\0') {
-    result.domains[0] = default_email_domain;
-    result.count = 1;
-    return result;
-  }
-
-  seastar::sstring raw(env);
-  std::size_t start = 0;
-  std::size_t pos;
-
-  while ((pos = raw.find(',', start)) != seastar::sstring::npos &&
-         result.count < MAX_EMAIL_DOMAINS) {
-    auto token = raw.substr(start, pos - start);
-    if (!token.empty())
-      result.domains[result.count++] = std::move(token);
-    start = pos + 1;
-  }
-
-  if (result.count < MAX_EMAIL_DOMAINS) {
-    auto tail = raw.substr(start);
-    if (!tail.empty())
-      result.domains[result.count++] = std::move(tail);
-  }
-
-  if (result.count == 0) {
-    result.domains[0] = default_email_domain;
-    result.count = 1;
-  }
-
-  return result;
-}
-
 int main(int argc, char **argv) {
   char **it = std::find_if(argv, argv + argc, [](const char *arg) {
     return std::string_view(arg) == "--version";
@@ -902,49 +764,57 @@ int main(int argc, char **argv) {
     std::cout << PROJECT_VERSION << std::endl;
     return EXIT_SUCCESS;
   }
-  seastar::app_template app;
+
+  const std::span<char *const> args{argv, static_cast<std::size_t>(argc)};
+
+  seastar::app_template::seastar_options opts;
+  opts.smp_opts.memory.set_value("64M");
+
+  seastar::app_template app(std::move(opts));
 
   uint16_t port = 2525;
   uint16_t default_timeout_seconds = 30;
 
   // clang-format off
   namespace po = boost::program_options;
-    app.add_options()
-      ("port,p",
-        po::value<uint16_t>()->default_value(port),
-        "SMTP port to listen on")
-      ("timeout,t",
-        po::value<uint32_t>()->default_value(default_timeout_seconds),
-        "Client idle timeout in seconds")
-      ("certificate,crt",
-        po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/certificate.crt"),
-        "X.509 certificate file")
-      ("privatekey,pk",
-        po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/private.key"),
-        "X.509 private key file");
+  app.add_options()
+    ("datadir,d",
+      po::value<seastar::sstring>()->default_value("/var/spool/smtp"),
+      "Data directory")
+    ("port,p",
+      po::value<uint16_t>()->default_value(port),
+      std::format("SMTP port to listen on (default: {})", port).data())
+    ("timeout,t",
+      po::value<uint32_t>()->default_value(default_timeout_seconds),
+      std::format("Client idle timeout in seconds (default: {})", default_timeout_seconds).data())
+    ("certificate,c",
+      po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/certificate.crt"),
+      "X.509 certificate file")
+    ("privatekey,k",
+      po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/private.key"),
+      "X.509 private key file")
+    ("auto-x509-domain,x",
+      po::bool_switch()->default_value(true),
+      "Loads domain using X.509 common name value from certificate file automatically")
+    ("version",
+      po::bool_switch()->default_value(false),
+      "Show version and exit");
   // clang-format on
 
   return app.run(argc, argv, [&app]() -> seastar::future<> {
     applog.info("mail version {}", PROJECT_VERSION);
 
-    // TODO: Load domain configuration
-    const sstring domain = "maildomain.ngo";
-    const sstring email_domain = "maildomain.ngo";
+    auto &cfg = app.configuration();
 
     size_t email_size_limit = 524288; // 512KB
-    uint16_t port = app.configuration()["port"].as<uint16_t>();
-    uint32_t timeout_seconds = app.configuration()["timeout"].as<uint32_t>();
-    sstring certificate_file_path =
-        app.configuration()["certificate"].as<sstring>();
-    sstring privatekey_file_path =
-        app.configuration()["privatekey"].as<sstring>();
+    uint16_t port = cfg["port"].as<uint16_t>();
+    uint32_t timeout_seconds = cfg["timeout"].as<uint32_t>();
+    sstring certificate_file_path = cfg["certificate"].as<sstring>();
+    sstring privatekey_file_path = cfg["privatekey"].as<sstring>();
     sstring cwd = std::filesystem::current_path().string();
 
-    applog.info("Using smtp domain as: {}", domain);
-
-    auto email_domains_result = load_email_domains(email_domain);
-    applog.info("Email domains accepted: {}",
-                email_helpers::join_email_domains(email_domains_result));
+    bool certificate_ok = false;
+    bool privatekey_ok = false;
 
     try {
       std::ifstream certificate_file(certificate_file_path);
@@ -952,9 +822,10 @@ int main(int argc, char **argv) {
         certificate_file_path = std::string(std::filesystem::weakly_canonical(
             std::filesystem::path(cwd.c_str()) / "certificate.crt"));
       }
-      if (!co_await seastar::file_accessible(certificate_file_path,
-                                             seastar::access_flags::read)) {
-
+      if (co_await seastar::file_accessible(certificate_file_path,
+                                            seastar::access_flags::read)) {
+        certificate_ok = true;
+      } else {
         applog.error("Error reading certificate file: {}",
                      certificate_file_path);
       }
@@ -974,11 +845,13 @@ int main(int argc, char **argv) {
         privatekey_file_path = std::string(std::filesystem::weakly_canonical(
             std::filesystem::path(cwd.c_str()) / "private.key"));
       }
-      if (!co_await seastar::file_accessible(privatekey_file_path,
-                                             seastar::access_flags::read)) {
-
+      if (co_await seastar::file_accessible(privatekey_file_path,
+                                            seastar::access_flags::read)) {
+        privatekey_ok = true;
+      } else {
         applog.error("Error reading privatekey file: {}", privatekey_file_path);
       }
+
     } catch (std::exception_ptr ep) {
       try {
         std::rethrow_exception(ep);
@@ -988,6 +861,53 @@ int main(int argc, char **argv) {
     } catch (const std::exception &ex) {
       applog.error("Error on privatekey file: {}", ex.what());
     }
+
+    if (!(certificate_ok && privatekey_ok)) {
+      applog.error("[CRITICAL!!!] Terminating service due to certificate and "
+                   "private key file errors.");
+      co_return;
+    }
+
+    // TODO: Load domain configuration
+    sstring domain = "localhost.localdomain";
+    sstring email_domain = "localhost.localdomain";
+
+    auto [common_name, x509_err] =
+        x509_helpers::parse_x509(certificate_file_path);
+
+    if (x509_err == std::errc()) {
+      sstring email_common_name = "user@" + common_name;
+      if (email_helpers::validate_email(email_common_name)) {
+        domain = common_name;
+        email_domain = common_name;
+      } else {
+        applog.warn("The domain on X.509 certificate is malformed. "
+                    "Auto-correcting to: {}.localdomain",
+                    common_name);
+        domain = common_name + ".localdomain";
+        email_domain = domain;
+      }
+    } else {
+      applog.error("[CRITICAL!!!] Terminating service due to invalid X.509 "
+                   "certificate file: {}",
+                   certificate_file_path);
+      co_return;
+    }
+
+    std::errc privatekey_ec =
+        x509_helpers::check_private_key(privatekey_file_path);
+    if (privatekey_ec != std::errc()) {
+      applog.error("[CRITICAL!!!] Terminating service due to invalid X.509 "
+                   "private key file: {}",
+                   privatekey_file_path);
+      co_return;
+    }
+
+    applog.info("Using smtp domain as: {}", domain);
+
+    auto email_domains_result = email_helpers::load_email_domains(email_domain);
+    applog.info("Email domains accepted: {}",
+                email_helpers::join_email_domains(email_domains_result));
 
     auto stop_signal = std::make_shared<seastar_apps_lib::stop_signal>();
 

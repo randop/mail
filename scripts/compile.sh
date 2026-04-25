@@ -28,8 +28,6 @@ else
   export LD_LIBRARY_PATH=$LOCAL_LIBRARY_PATH
 fi
 
-clang-format -i src/main.cpp
-
 mkdir -p .build
 cd .build
 cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
