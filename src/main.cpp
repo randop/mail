@@ -537,7 +537,7 @@ seastar::future<> handle_connection(
 
   // TODO: Check configuration
   bool maildir_support = true;
-  if (maildir_support) {
+  if (maildir_support && state_data_started && state_data_ended) {
     std::filesystem::path source_email(email_filename);
     std::filesystem::path target_email(datadirectory + sep + "maildir" + sep +
                                        "new" + sep + email_real_filename);
