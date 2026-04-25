@@ -53,22 +53,12 @@ this software will be made available under the specified Change License.
 #include <seastar/util/tmp_file.hh>
 
 #include <algorithm>
-#include <atomic>
-#include <cctype>
-#include <cerrno>
-#include <chrono>
-#include <cstddef>
-#include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <format>
-#include <iomanip>
 #include <iostream>
-#include <memory>
 #include <optional>
-#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -79,6 +69,7 @@ this software will be made available under the specified Change License.
 #include "file_helpers.hpp"
 #include "ip_helpers.hpp"
 #include "stop_signal.hh"
+#include "string_helpers.hpp"
 #include "uuid_helpers.hpp"
 #include "x509_helpers.hpp"
 
@@ -86,6 +77,7 @@ this software will be made available under the specified Change License.
 #define EXIT_FAILURE 1
 
 using namespace seastar;
+using namespace string_helpers;
 
 static seastar::logger applog("smtp-server");
 
@@ -140,62 +132,6 @@ struct smtp_session {
     }
   }
 };
-
-/// @warning Passing `nullptr` for @p a results in undefined behavior.
-constexpr bool compare_strings_ab(const char *a, const std::string &b) {
-  if (!a) {
-    return false;
-  }
-
-  size_t i = 0;
-
-  auto to_lower = [](unsigned char c) constexpr {
-    return static_cast<char>(std::tolower(c));
-  };
-
-  size_t b_size = b.size();
-
-  while (a[i] != '\0' && i < b_size) {
-    if (to_lower(static_cast<unsigned char>(a[i])) !=
-        to_lower(static_cast<unsigned char>(b[i]))) {
-      return false;
-    }
-    if ((i + 1) > b_size) {
-      break;
-    }
-    ++i;
-  }
-
-  return i == b_size;
-}
-
-constexpr bool compare_strings_view(const std::string_view &a,
-                                    const std::string_view &b) {
-  if (a.size() == 0 || b.size() == 0) {
-    return false;
-  }
-
-  size_t i = 0;
-
-  auto to_lower = [](unsigned char c) constexpr {
-    return static_cast<char>(std::tolower(c));
-  };
-
-  size_t b_size = b.size();
-
-  while (a[i] != '\0' && i < b_size) {
-    if (to_lower(static_cast<unsigned char>(a[i])) !=
-        to_lower(static_cast<unsigned char>(b[i]))) {
-      return false;
-    }
-    if ((i + 1) > b_size) {
-      break;
-    }
-    ++i;
-  }
-
-  return i == b_size;
-}
 
 seastar::future<> handle_connection(
     seastar::connected_socket cs, seastar::socket_address remote,
@@ -466,7 +402,7 @@ seastar::future<> handle_connection(
 
               std::string_view check_email = email.substr(email.find("@") + 1);
               for (size_t i = 0; i < email_domains.count; i++) {
-                if (compare_strings_view(check_email,
+                if (compare_string_views(check_email,
                                          email_domains.domains[i])) {
                   ok_rcpt_count++;
                   break;

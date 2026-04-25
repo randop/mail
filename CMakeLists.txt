@@ -56,8 +56,9 @@ add_executable(smtp-server
   src/email_helpers.cpp
   src/file_helpers.cpp
   src/ip_helpers.cpp
-  src/x509_helpers.cpp
+  src/string_helpers.cpp
   src/uuid_helpers.cpp
+  src/x509_helpers.cpp
 )
 
 target_link_libraries(smtp-server PRIVATE Seastar::seastar)
