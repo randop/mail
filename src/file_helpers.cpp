@@ -86,6 +86,12 @@ std::errc check_data_directory(const std::string &data_directory) {
     return std::errc::permission_denied;
   }
 
+  maildir_path =
+      std::filesystem::path(data_directory + sep + "maildir" + sep + "spam");
+  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
+    return std::errc::permission_denied;
+  }
+
   return std::errc();
 }
 
