@@ -532,6 +532,7 @@ seastar::future<> handle_connection(
       }
     }
 
+    applog.info("emailfile.flush()...");
     co_await emailfile.flush();
 
     if (state_data_started && state_data_ended) {
