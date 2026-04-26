@@ -210,7 +210,7 @@ seastar::future<> handle_connection(
     auto sub = as.subscribe([&]() noexcept {
       active = false;
       idle_timer.cancel();
-      applog.warn("aborting client {} ...", remote);
+      applog.warn("aborting client {} ...", ip);
       try {
         session->cs.shutdown_input();
         session->cs.shutdown_output();
@@ -219,9 +219,9 @@ seastar::future<> handle_connection(
       }
     });
 
-    idle_timer.set_callback([&, remote] {
+    idle_timer.set_callback([&, ip] {
       active = false;
-      applog.warn("client {} timeout, closing ...", remote);
+      applog.warn("client {} timeout, closing ...", ip);
       try {
         session->cs.shutdown_input();
         session->cs.shutdown_output();
@@ -250,6 +250,7 @@ seastar::future<> handle_connection(
           break;
         } else {
           ip_helpers::format_ip(*proxy_info, ip_info);
+          applog.info("Detected real ip {} of client {}", ip, remote);
         }
       }
       buf = co_await session->in.read();
@@ -263,7 +264,7 @@ seastar::future<> handle_connection(
       if (!in_data) {
         if ((cmd_buffer.size() + buf.size()) > SMTP_COMMAND_BUFFER_SIZE_LIMIT) {
           active = false;
-          applog.error("Client {} exceeded command buffer limit", remote);
+          applog.error("Client {} exceeded command buffer limit", ip);
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
           break;
         }
@@ -479,7 +480,7 @@ seastar::future<> handle_connection(
           } else if (cmd_view.starts_with("STARTTLS")) {
             co_await session->send("220 Ready to start TLS\r\n");
             co_await session->upgrade_tls(certs);
-            applog.info("Session {} upgraded to TLS", remote);
+            applog.info("Session of {} upgraded to TLS", ip);
           } else if (cmd_view.starts_with("DATA")) {
             if (ok_rcpt_count >= 1 && ok_mailfrom_count >= 1) {
               in_data = true;
@@ -534,16 +535,16 @@ seastar::future<> handle_connection(
     co_await emailfile.flush();
 
     if (state_data_started && state_data_ended) {
-      applog.info("Writing client {} logs on {} and email file: {}", remote,
+      applog.info("Writing client {} logs on {} and email file: {}", ip,
                   log_filename, email_filename);
     } else {
       applog.warn("Email transaction failure {} on client {}", log_filename,
-                  remote);
+                  ip);
     }
   } catch (const seastar::timed_out_error &err) {
-    applog.info("Client {} idle timeout", remote);
+    applog.info("Client {} idle timeout", ip);
   } catch (const std::exception &ex) {
-    applog.warn("Connection {} error: {}", remote, ex.what());
+    applog.warn("Connection {} error: {}", ip, ex.what());
   }
 
   idle_timer.cancel();
