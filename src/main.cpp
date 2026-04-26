@@ -147,12 +147,17 @@ seastar::future<> handle_connection(
     const seastar::sstring email_domain, const seastar::sstring datadirectory,
     seastar::lw_shared_ptr<bool> proxy_support) {
 
+  sstring sid_uuid = uuid_helpers::generate_v7();
+  std::string_view sid_view(sid_uuid.data(), sid_uuid.size());
+  sstring sid = uuid_helpers::session_uuid(sid_view);
+
   auto ip_info = ip_helpers::get_ip_address(remote);
   auto &ip = ip_info.ip;
   std::string sep(1, std::filesystem::path::preferred_separator);
   sstring email_real_filename = generate_email_filename();
   seastar::sstring email_filename = datadirectory + sep + email_real_filename;
-  applog.info("New client {} connection, session: {}", remote, email_filename);
+  applog.info("{} new client {} connection, session logging on: {}", sid,
+              remote, email_filename);
 
   std::unique_ptr<smtp_session> session;
 
@@ -212,7 +217,7 @@ seastar::future<> handle_connection(
     auto sub = as.subscribe([&]() noexcept {
       active = false;
       idle_timer.cancel();
-      applog.warn("aborting client {} ...", ip);
+      applog.warn("{} aborting client {} ...", sid, ip);
       try {
         session->cs.shutdown_input();
         session->cs.shutdown_output();
@@ -223,7 +228,7 @@ seastar::future<> handle_connection(
 
     idle_timer.set_callback([&, ip] {
       active = false;
-      applog.warn("client {} timeout, closing ...", ip);
+      applog.warn("{} client {} timeout, closing ...", sid, ip);
       try {
         session->cs.shutdown_input();
         session->cs.shutdown_output();
@@ -247,12 +252,12 @@ seastar::future<> handle_connection(
         auto proxy_info =
             ip_helpers::parse_proxy_v2(header.get(), body.get(), header_length);
         if (!proxy_info) [[unlikely]] {
-          applog.error("proxy protocol violation of client {}", remote);
+          applog.error("{} proxy protocol violation of client {}", sid, remote);
           active = false;
           break;
         } else {
           ip_helpers::format_ip(*proxy_info, ip_info);
-          applog.info("Detected real ip {} of client {}", ip, remote);
+          applog.info("{} detected real ip {} of client {}", sid, ip, remote);
         }
       }
       buf = co_await session->in.read();
@@ -266,7 +271,7 @@ seastar::future<> handle_connection(
       if (!in_data) {
         if ((cmd_buffer.size() + buf.size()) > SMTP_COMMAND_BUFFER_SIZE_LIMIT) {
           active = false;
-          applog.error("Client {} exceeded command buffer limit", ip);
+          applog.error("{} client {} exceeded command buffer limit", sid, ip);
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
           break;
         }
@@ -278,7 +283,7 @@ seastar::future<> handle_connection(
       }
 
       if (in_data) {
-        applog.trace("IN DATA MODE...");
+        applog.trace("{} IN DATA MODE...", sid);
         data_size += buf.size();
         if (data_size > email_size_limit) {
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
@@ -321,7 +326,7 @@ seastar::future<> handle_connection(
         email_buffer.append(buf.get(), buf.size());
 
         if (email_buffer.size() >= emailfile_align) {
-          applog.trace("DMA_WRITE: email content <{}>", email_filename);
+          applog.trace("{} DMA_WRITE: email content <{}>", sid, email_filename);
           size_t to_write = email_buffer.size() & ~(emailfile_align - 1);
 
           seastar::temporary_buffer<char> out(to_write);
@@ -343,25 +348,25 @@ seastar::future<> handle_connection(
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "EHLO") ||
                 compare_strings_ab(p, "HELO")) {
-              applog.trace("EHLO / HELO found at {}", cmd_pos);
+              applog.trace("{} EHLO / HELO found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
               cmd = SMTP_COMMAND::EHLO;
             } else if (compare_strings_ab(p, "QUIT")) {
-              applog.trace("QUIT found at {}", cmd_pos);
+              applog.trace("{} QUIT found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
               cmd = SMTP_COMMAND::QUIT;
             } else if (compare_strings_ab(p, "AUTH")) {
-              applog.trace("AUTH found at {}", cmd_pos);
+              applog.trace("{} AUTH found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
               cmd = SMTP_COMMAND::AUTH;
             } else if (compare_strings_ab(p, "DATA")) {
-              applog.trace("DATA found at {}", cmd_pos);
+              applog.trace("{} DATA found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_command = false;
               in_data = true;
@@ -373,14 +378,14 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 8) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "RCPT TO:")) {
-              applog.trace("RCPT TO found at {}", cmd_pos);
+              applog.trace("{} RCPT TO found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
               cmd = SMTP_COMMAND::RCPT;
             }
             if (compare_strings_ab(p, "STARTTLS")) {
-              applog.trace("STARTTLS found at {}", cmd_pos);
+              applog.trace("{} STARTTLS found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
@@ -390,7 +395,7 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 10) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "MAIL FROM:")) {
-              applog.trace("MAIL FROM found at {}", cmd_pos);
+              applog.trace("{} MAIL FROM found at {}", sid, cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 10;
@@ -405,7 +410,7 @@ seastar::future<> handle_connection(
           while (crlf_pos + 1 < cmd_buffer.size()) {
             if (cmd_buffer[crlf_pos] == '\r' &&
                 cmd_buffer[crlf_pos + 1] == '\n') {
-              applog.trace("<CRLF> found at {}", crlf_pos);
+              applog.trace("{} <CRLF> found at {}", sid, crlf_pos);
               crlf_pos += 2;
               in_command = true;
               in_crlf = true;
@@ -425,13 +430,13 @@ seastar::future<> handle_connection(
         } else {
           // clear
           cmd_view = std::string_view(cmd_buffer.data(), 0);
-          applog.trace("clear cmd_view: {}", cmd_view);
+          applog.trace("{} clear cmd_view: {}", sid, cmd_view);
         }
 
         if (in_command && in_crlf) {
           cmd_pos = crlf_pos;
           cmd_start_index = cmd_pos;
-          applog.info("command: {}", cmd_view);
+          applog.info("{} command: {}", sid, cmd_view);
 
           if (cmd_view.starts_with("EHLO ") ||
               cmd_view.starts_with("HELO " || cmd == SMTP_COMMAND::EHLO)) {
@@ -491,7 +496,7 @@ seastar::future<> handle_connection(
                      cmd == SMTP_COMMAND::STARTTLS) {
             co_await session->send("220 Ready to start TLS\r\n");
             co_await session->upgrade_tls(certs);
-            applog.info("Session of {} upgraded to TLS", ip);
+            applog.info("{} session of {} upgraded to TLS", sid, ip);
           } else if (cmd_view.starts_with("DATA") ||
                      cmd == SMTP_COMMAND::DATA) {
             if (ok_rcpt_count >= 1 && ok_mailfrom_count >= 1) {
@@ -535,7 +540,8 @@ seastar::future<> handle_connection(
       // _closing_state == state::closed)` failed. Illegal instruction (core
       // dumped)
       bool pad_zeros = true;
-      applog.trace("DMA_WRITE: email data remnant <{}>", email_filename);
+      applog.trace("{} DMA_WRITE: email data remnant <{}>", sid,
+                   email_filename);
       if (pad_zeros) {
         size_t padded = (email_buffer.size() + emailfile_align - 1) &
                         ~(emailfile_align - 1);
@@ -555,27 +561,27 @@ seastar::future<> handle_connection(
     co_await emailfile.flush();
 
     if (state_data_started && state_data_ended) {
-      applog.info("Writing client {} logs on {} and email file: {}", ip,
+      applog.info("{} written client {} logs on {} and email file: {}", sid, ip,
                   log_filename, email_filename);
     } else {
-      applog.warn("Email transaction failure {} on client {}", log_filename,
-                  ip);
+      applog.warn("{} email transaction failure {} on client {}", sid,
+                  log_filename, ip);
     }
   } catch (const seastar::timed_out_error &err) {
-    applog.info("Client {} idle timeout", ip);
+    applog.warn("{} client {} idle timeout", sid, ip);
   } catch (const std::exception_ptr &ep) {
     try {
       std::rethrow_exception(ep);
     } catch (const std::system_error &e) {
-      applog.error("System error (errno {}): {} - what(): {}", e.code().value(),
-                   e.code().message(), e.what());
+      applog.error("{} system error (errno {}): {} - what(): {}", sid,
+                   e.code().value(), e.code().message(), e.what());
     } catch (const std::exception &e) {
-      applog.error("std::exception caught: what() = {}", e.what());
+      applog.error("{} exception caught: what() = {}", sid, e.what());
     } catch (...) {
-      applog.error("Unknown exception (not std::exception)");
+      applog.error("{} unknown exception while processing", sid);
     }
   } catch (const std::exception &ex) {
-    applog.warn("Connection {} error: {}", ip, ex.what());
+    applog.warn("{} connection {} error: {}", sid, ip, ex.what());
   }
 
   idle_timer.cancel();
@@ -597,13 +603,15 @@ seastar::future<> handle_connection(
     std::filesystem::path source_email(email_filename);
     std::filesystem::path target_email(datadirectory + sep + "maildir" + sep +
                                        "new" + sep + email_real_filename);
-    if (!file_helpers::move_file_safe(source_email, target_email)) {
-      applog.error("Maildir error moving {} to {}", source_email.string(),
-                   target_email.string());
+    if (file_helpers::move_file_safe(source_email, target_email)) {
+      applog.info("{} new mail received on {}", sid, target_email.string());
+    } else {
+      applog.error("{} maildir error moving {} to {}", sid,
+                   source_email.string(), target_email.string());
     }
   }
 
-  applog.info("Client [{}] {} connection finished", ip, remote);
+  applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
 
   gate.leave();
 
@@ -675,13 +683,13 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
           .finally([&gate, &connection_count, &connect_semaphore] {
             connect_semaphore.signal();
             connection_count--;
-            applog.info("Finally closing connections...");
+            applog.trace("finally closing connections...");
           });
     } catch (const seastar::abort_requested_exception &) {
       break;
     } catch (const std::exception &ex) {
       if (!as.abort_requested()) {
-        applog.error("Accept failed: {}", ex.what());
+        applog.error("connection accept failed: {}", ex.what());
       }
     }
   }

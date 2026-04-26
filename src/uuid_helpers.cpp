@@ -55,4 +55,33 @@ seastar::sstring generate_v7() {
   }
   return out;
 }
+
+constexpr uint64_t fnv1a_64(std::string_view s) noexcept {
+  uint64_t hash = 14695981039346656037ull;
+  for (unsigned char c : s) {
+    hash ^= c;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+std::string to_base62(uint64_t value) {
+  static constexpr char chars[] =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+  std::string out;
+  do {
+    out.push_back(chars[value % 62]);
+    value /= 62;
+  } while (value);
+
+  std::reverse(out.begin(), out.end());
+  return out;
+}
+
+std::string session_uuid(std::string_view uuid_v7) {
+  uint64_t h = fnv1a_64(uuid_v7);
+  return "[S:" + to_base62(h) + "]";
+}
+
 } // namespace uuid_helpers
