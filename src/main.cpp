@@ -680,6 +680,8 @@ int main(int argc, char **argv) {
     show_help = true;
   }
 
+  applog.set_level(seastar::log_level::trace);
+
   applog.info("mail version {}", PROJECT_VERSION);
   const std::span<char *const> args{argv, static_cast<std::size_t>(argc)};
 
