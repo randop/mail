@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Suppress Boost-related CMake warnings
-cmake_policy(SET CMP0144 NEW)
-cmake_policy(SET CMP0167 NEW)
-set(Boost_NO_WARN_NEW_VERSIONS ON)
+# Legacy cmake versions does not support suppression of some warnings
+set(FEATURE_MIN_VERSION "4.3.0")
+
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "${FEATURE_MIN_VERSION}")
+  # Suppress Boost-related CMake warnings
+  cmake_policy(SET CMP0144 NEW)
+  cmake_policy(SET CMP0167 NEW)
+  set(Boost_NO_WARN_NEW_VERSIONS ON)
+endif()
 
 file(STRINGS "VERSION" PROJECT_VERSION_STRING LIMIT_COUNT 1)
 string(STRIP "${PROJECT_VERSION_STRING}" PROJECT_VERSION_STRING)
