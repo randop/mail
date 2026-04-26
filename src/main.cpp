@@ -68,6 +68,7 @@ this software will be made available under the specified Change License.
 #include <utility>
 #include <vector>
 
+#include "constants.hpp"
 #include "email_helpers.hpp"
 #include "file_helpers.hpp"
 #include "ip_helpers.hpp"
@@ -143,13 +144,15 @@ seastar::future<> handle_connection(
     shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
     const seastar::sstring domain,
     seastar::lw_shared_ptr<email_domains_t> all_email_domains,
-    const seastar::sstring email_domain, const seastar::sstring datadirectory) {
+    const seastar::sstring email_domain, const seastar::sstring datadirectory,
+    seastar::lw_shared_ptr<bool> proxy_support) {
 
   auto [ip, ec] = ip_helpers::get_ip_address(remote);
   std::string sep(1, std::filesystem::path::preferred_separator);
   sstring email_real_filename = generate_email_filename();
   seastar::sstring email_filename = datadirectory + sep + email_real_filename;
   applog.info("New client {} connection, session: {}", remote, email_filename);
+  applog.info("Proxy support: {}", *proxy_support);
 
   std::unique_ptr<smtp_session> session;
 
@@ -236,7 +239,7 @@ seastar::future<> handle_connection(
                        std::chrono::seconds(timeout_seconds));
 
       if (!in_data) {
-        if ((cmd_buffer.size() + buf.size()) > SMTP_COMMAND_BUFFER_LIMIT_SIZE) {
+        if ((cmd_buffer.size() + buf.size()) > SMTP_COMMAND_BUFFER_SIZE_LIMIT) {
           active = false;
           applog.error("Client {} exceeded command buffer limit", remote);
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
@@ -559,8 +562,8 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       const seastar::sstring domain, const seastar::sstring certificate,
       const seastar::sstring privatekey,
       seastar::lw_shared_ptr<email_domains_t> all_email_domains,
-      const seastar::sstring email_domain,
-      const seastar::sstring datadirectory) {
+      const seastar::sstring email_domain, const seastar::sstring datadirectory,
+      seastar::lw_shared_ptr<bool> proxy_support) {
 
   applog.trace("Loading X.509 certificates... {} , {}", certificate,
                privatekey);
@@ -606,7 +609,8 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
                               gate, as, certs, email_size_limit, domain,
-                              all_email_domains, email_domain, datadirectory)
+                              all_email_domains, email_domain, datadirectory,
+                              proxy_support)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
@@ -697,6 +701,9 @@ int main(int argc, char **argv) {
     ("privatekey",
       po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/private.key"),
       "X.509 private key file")
+    ("proxy-support",
+      po::bool_switch()->default_value(false),
+      "Read real client IP using PROXY protocol v2")
     ("version",
       po::bool_switch()->default_value(false),
       "Show version and exit");
@@ -712,9 +719,6 @@ int main(int argc, char **argv) {
     if (err_view.find("unrecognised option '--help'") !=
         std::string_view::npos) {
       show_help = true;
-    } else if (err_view.find("unrecognised option '--help-seastar'") !=
-               std::string_view::npos) {
-      show_help = true;
     } else {
       applog.error("program options error: {}", err.what());
       return EXIT_FAILURE;
@@ -729,6 +733,7 @@ int main(int argc, char **argv) {
 
   std::string certificate = "certificate.crt";
   std::string privatekey = "private.key";
+
   if (!show_help) {
     try {
 
@@ -880,7 +885,7 @@ int main(int argc, char **argv) {
        privatekey_file_path = std::move(privatekey)]() -> seastar::future<> {
         auto &cfg = app.configuration();
 
-        size_t email_size_limit = 524288; // 512KB
+        size_t email_size_limit = DEFAULT_EMAIL_SIZE_LIMIT;
         uint16_t port = cfg["port"].as<uint16_t>();
         uint32_t timeout_seconds = cfg["timeout"].as<uint32_t>();
 
@@ -910,15 +915,18 @@ int main(int argc, char **argv) {
         seastar::lw_shared_ptr<email_domains_t> all_email_domains =
             seastar::make_lw_shared<email_domains_t>(email_domains_result);
 
+        seastar::lw_shared_ptr<bool> proxy_support =
+            seastar::make_lw_shared<bool>(cfg["proxy-support"].as<bool>());
+
         auto shards_future = seastar::smp::invoke_on_all(
             [port, &abort_sources, &gate, timeout_seconds,
              email_size_limit = email_size_limit, domain = sstring(domain),
              datadirectory, certificate, privatekey, email_domain,
-             all_email_domains] {
+             all_email_domains, proxy_support] {
               return serve(port, abort_sources.local(), gate.local(),
                            timeout_seconds, email_size_limit, domain,
                            certificate, privatekey, all_email_domains,
-                           email_domain, datadirectory);
+                           email_domain, datadirectory, proxy_support);
             });
 
         applog.info("server listening on 0.0.0.0 port {}", port);
