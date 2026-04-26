@@ -287,7 +287,9 @@ seastar::future<> handle_connection(
         data_buffer.append(buf.get(), buf.size());
         if ((data_pos + 7) <= data_buffer.size()) {
           std::string_view data_terminator = data_buffer.substr(data_pos);
-          if (data_terminator.find("\r\n\r\n.\r\n") != std::string_view::npos) {
+          if ((data_terminator.find("\r\n\r\n.\r\n") !=
+               std::string_view::npos) ||
+              (data_terminator.find("\r\n.\r\n") != std::string_view::npos)) {
             in_data = false;
             in_command = true;
             is_data_ended = true;
@@ -302,8 +304,9 @@ seastar::future<> handle_connection(
               ((data_pos - 14) < data_buffer.size())) {
             std::string_view data_terminator =
                 data_buffer.substr(data_pos - 14);
-            if (data_terminator.find("\r\n\r\n.\r\n") !=
-                std::string_view::npos) {
+            if ((data_terminator.find("\r\n\r\n.\r\n") !=
+                 std::string_view::npos) ||
+                (data_terminator.find("\r\n.\r\n") != std::string_view::npos)) {
               in_data = false;
               in_command = true;
               is_data_ended = true;
