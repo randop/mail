@@ -28,10 +28,39 @@ else
   export LD_LIBRARY_PATH=$LOCAL_LIBRARY_PATH
 fi
 
-clang-format -i src/main.cpp
-
 mkdir -p .dist
 cd .dist
-cmake .. -DCMAKE_BUILD_TYPE=Release
+
+detect_ubuntu_jammy() {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    [ "$ID" = "ubuntu" ] && [ "$VERSION_ID" = "22.04" ]
+    return $?
+  fi
+
+  if [ -f /etc/lsb-release ]; then
+    . /etc/lsb-release
+    [ "$DISTRIB_ID" = "Ubuntu" ] && [ "$DISTRIB_RELEASE" = "22.04" ]
+    return $?
+  fi
+
+  if [ -f /etc/issue ]; then
+    case $(cat /etc/issue) in
+    *"Ubuntu 22.04"*) return 0 ;;
+    esac
+    return 1
+  fi
+
+  return 2
+}
+
+if detect_ubuntu_jammy; then
+  echo "Ubuntu 22.04 LTS (Jammy Jellyfish) detected."
+  export CC=gcc-13
+  export CXX=g++-13
+  cmake .. -DCMAKE_C_COMPILER=/usr/bin/gcc-13 -DCMAKE_CXX_COMPILER=/usr/bin/g++-13 -DCMAKE_BUILD_TYPE=Release
+else
+  cmake .. -DCMAKE_BUILD_TYPE=Release
+fi
 
 make -j$(nproc)
