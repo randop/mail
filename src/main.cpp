@@ -278,7 +278,7 @@ seastar::future<> handle_connection(
       }
 
       if (in_data) {
-        applog.info("IN DATA MODE...");
+        applog.trace("IN DATA MODE...");
         data_size += buf.size();
         if (data_size > email_size_limit) {
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
@@ -321,7 +321,7 @@ seastar::future<> handle_connection(
         email_buffer.append(buf.get(), buf.size());
 
         if (email_buffer.size() >= emailfile_align) {
-          applog.info("DMA_WRITE: email content <{}>", email_filename);
+          applog.trace("DMA_WRITE: email content <{}>", email_filename);
           size_t to_write = email_buffer.size() & ~(emailfile_align - 1);
 
           seastar::temporary_buffer<char> out(to_write);
@@ -343,25 +343,25 @@ seastar::future<> handle_connection(
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "EHLO") ||
                 compare_strings_ab(p, "HELO")) {
-              applog.info("EHLO / HELO found at {}", cmd_pos);
+              applog.trace("EHLO / HELO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
               cmd = SMTP_COMMAND::EHLO;
             } else if (compare_strings_ab(p, "QUIT")) {
-              applog.info("QUIT found at {}", cmd_pos);
+              applog.trace("QUIT found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
               cmd = SMTP_COMMAND::QUIT;
             } else if (compare_strings_ab(p, "AUTH")) {
-              applog.info("AUTH found at {}", cmd_pos);
+              applog.trace("AUTH found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
               cmd = SMTP_COMMAND::AUTH;
             } else if (compare_strings_ab(p, "DATA")) {
-              applog.info("DATA found at {}", cmd_pos);
+              applog.trace("DATA found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_command = false;
               in_data = true;
@@ -373,14 +373,14 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 8) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "RCPT TO:")) {
-              applog.info("RCPT TO found at {}", cmd_pos);
+              applog.trace("RCPT TO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
               cmd = SMTP_COMMAND::RCPT;
             }
             if (compare_strings_ab(p, "STARTTLS")) {
-              applog.info("STARTTLS found at {}", cmd_pos);
+              applog.trace("STARTTLS found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
@@ -390,7 +390,7 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 10) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "MAIL FROM:")) {
-              applog.info("MAIL FROM found at {}", cmd_pos);
+              applog.trace("MAIL FROM found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 10;
@@ -535,7 +535,7 @@ seastar::future<> handle_connection(
       // _closing_state == state::closed)` failed. Illegal instruction (core
       // dumped)
       bool pad_zeros = true;
-      applog.info("DMA_WRITE: email data remnant <{}>", email_filename);
+      applog.trace("DMA_WRITE: email data remnant <{}>", email_filename);
       if (pad_zeros) {
         size_t padded = (email_buffer.size() + emailfile_align - 1) &
                         ~(emailfile_align - 1);
@@ -603,7 +603,7 @@ seastar::future<> handle_connection(
     }
   }
 
-  applog.info("Client {} connection finished", remote);
+  applog.info("Client [{}] {} connection finished", ip, remote);
 
   gate.leave();
 
@@ -619,7 +619,8 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       const seastar::sstring email_domain, const seastar::sstring datadirectory,
       seastar::lw_shared_ptr<bool> proxy_support) {
 
-  applog.info("Loading X.509 certificates... {} , {}", certificate, privatekey);
+  applog.trace("Loading X.509 certificates {}, {} ...", certificate,
+               privatekey);
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file(certificate, privatekey,
                                     tls::x509_crt_format::PEM);
