@@ -514,7 +514,12 @@ seastar::future<> handle_connection(
     }
 
     if (!email_buffer.empty()) {
-      bool pad_zeros = false;
+      // TODO: Investigate virtual
+      // seastar::append_challenged_posix_file_impl::~append_challenged_posix_file_impl():
+      // Assertion `_q.empty() && (_logical_size == _committed_size ||
+      // _closing_state == state::closed)` failed. Illegal instruction (core
+      // dumped)
+      bool pad_zeros = true;
       applog.info("DMA_WRITE: email data remnant <{}>", email_filename);
       if (pad_zeros) {
         size_t padded = (email_buffer.size() + emailfile_align - 1) &
