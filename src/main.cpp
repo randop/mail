@@ -276,7 +276,7 @@ seastar::future<> handle_connection(
       }
 
       if (in_data) {
-        applog.trace("IN DATA MODE...");
+        applog.info("IN DATA MODE...");
         data_size += buf.size();
         if (data_size > email_size_limit) {
           co_await session->send("552 5.3.4 Message size limit exceeded\r\n");
@@ -321,7 +321,7 @@ seastar::future<> handle_connection(
         }
 
         if (email_buffer.size() >= emailfile_align) {
-          applog.trace("DMA_WRITE: email content <{}>", email_filename);
+          applog.info("DMA_WRITE: email content <{}>", email_filename);
           size_t to_write = email_buffer.size() & ~(emailfile_align - 1);
 
           seastar::temporary_buffer<char> out(to_write);
@@ -343,22 +343,22 @@ seastar::future<> handle_connection(
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "EHLO") ||
                 compare_strings_ab(p, "HELO")) {
-              applog.trace("EHLO / HELO found at {}", cmd_pos);
+              applog.info("EHLO / HELO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
             } else if (compare_strings_ab(p, "QUIT")) {
-              applog.trace("QUIT found at {}", cmd_pos);
+              applog.info("QUIT found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
             } else if (compare_strings_ab(p, "AUTH")) {
-              applog.trace("AUTH found at {}", cmd_pos);
+              applog.info("AUTH found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
             } else if (compare_strings_ab(p, "DATA")) {
-              applog.trace("DATA found at {}", cmd_pos);
+              applog.info("DATA found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_command = false;
               in_data = true;
@@ -369,13 +369,13 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 8) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "RCPT TO:")) {
-              applog.trace("RCPT TO found at {}", cmd_pos);
+              applog.info("RCPT TO found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
             }
             if (compare_strings_ab(p, "STARTTLS")) {
-              applog.trace("STARTTLS found at {}", cmd_pos);
+              applog.info("STARTTLS found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
@@ -384,7 +384,7 @@ seastar::future<> handle_connection(
           if ((cmd_pos + 10) <= cmd_buffer.size()) {
             auto *p = cmd_buffer.data() + cmd_pos;
             if (compare_strings_ab(p, "MAIL FROM:")) {
-              applog.trace("MAIL FROM found at {}", cmd_pos);
+              applog.info("MAIL FROM found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 10;
@@ -398,7 +398,7 @@ seastar::future<> handle_connection(
           while (crlf_pos + 1 < cmd_buffer.size()) {
             if (cmd_buffer[crlf_pos] == '\r' &&
                 cmd_buffer[crlf_pos + 1] == '\n') {
-              applog.trace("<CRLF> found at {}", crlf_pos);
+              applog.info("<CRLF> found at {}", crlf_pos);
               crlf_pos += 2;
               in_command = true;
               in_crlf = true;
@@ -418,13 +418,13 @@ seastar::future<> handle_connection(
         } else {
           // clear
           cmd_view = std::string_view(cmd_buffer.data(), 0);
-          applog.trace("clear cmd_view: {}", cmd_view);
+          applog.info("clear cmd_view: {}", cmd_view);
         }
 
         if (in_command && in_crlf) {
           cmd_pos = crlf_pos;
           cmd_start_index = cmd_pos;
-          applog.trace("command: {}", cmd_view);
+          applog.info("command: {}", cmd_view);
 
           if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
             ok_rcpt_count = 0;
@@ -515,7 +515,7 @@ seastar::future<> handle_connection(
 
     if (!email_buffer.empty()) {
       bool pad_zeros = false;
-      applog.trace("DMA_WRITE: email data remnant <{}>", email_filename);
+      applog.info("DMA_WRITE: email data remnant <{}>", email_filename);
       if (pad_zeros) {
         size_t padded = (email_buffer.size() + emailfile_align - 1) &
                         ~(emailfile_align - 1);
@@ -544,6 +544,17 @@ seastar::future<> handle_connection(
     }
   } catch (const seastar::timed_out_error &err) {
     applog.info("Client {} idle timeout", ip);
+  } catch (const std::exception_ptr &ep) {
+    try {
+      std::rethrow_exception(ep);
+    } catch (const std::system_error &e) {
+      applog.error("System error (errno {}): {} - what(): {}", e.code().value(),
+                   e.code().message(), e.what());
+    } catch (const std::exception &e) {
+      applog.error("std::exception caught: what() = {}", e.what());
+    } catch (...) {
+      applog.error("Unknown exception (not std::exception)");
+    }
   } catch (const std::exception &ex) {
     applog.warn("Connection {} error: {}", ip, ex.what());
   }
@@ -589,8 +600,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       const seastar::sstring email_domain, const seastar::sstring datadirectory,
       seastar::lw_shared_ptr<bool> proxy_support) {
 
-  applog.trace("Loading X.509 certificates... {} , {}", certificate,
-               privatekey);
+  applog.info("Loading X.509 certificates... {} , {}", certificate, privatekey);
   auto certs = make_shared<tls::server_credentials>();
   co_await certs->set_x509_key_file(certificate, privatekey,
                                     tls::x509_crt_format::PEM);
@@ -645,7 +655,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
           .finally([&gate, &connection_count, &connect_semaphore] {
             connect_semaphore.signal();
             connection_count--;
-            applog.trace("Finally closing connections...");
+            applog.info("Finally closing connections...");
           });
     } catch (const seastar::abort_requested_exception &) {
       break;
@@ -679,8 +689,6 @@ int main(int argc, char **argv) {
   if (help_it != argv + argc) {
     show_help = true;
   }
-
-  applog.set_level(seastar::log_level::trace);
 
   applog.info("mail version {}", PROJECT_VERSION);
   const std::span<char *const> args{argv, static_cast<std::size_t>(argc)};
