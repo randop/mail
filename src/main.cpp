@@ -163,7 +163,6 @@ seastar::future<> handle_connection(
   bool in_command = true;
   bool in_crlf = false;
   bool in_cmd_boundary = false;
-  constexpr int ZERO = 0;
 
   seastar::sstring data_buffer;
   bool in_data = false;
@@ -380,7 +379,7 @@ seastar::future<> handle_connection(
 
               size_t p_size = (crlf_pos - cmd_start_index) - 1;
               // guard against negative value
-              if ((crlf_pos - cmd_start_index - 1) < ZERO) {
+              if ((crlf_pos - cmd_start_index - 1) < CMD_POSITION_ZERO) {
                 p_size = 0;
               }
               cmd_view =
@@ -643,6 +642,16 @@ int main(int argc, char **argv) {
     return EXIT_SUCCESS;
   }
 
+  bool show_help = false;
+
+  char **help_it = std::find_if(argv, argv + argc, [](const char *arg) {
+    return std::string_view(arg) == "--help";
+  });
+
+  if (help_it != argv + argc) {
+    show_help = true;
+  }
+
   applog.info("mail version {}", PROJECT_VERSION);
   const std::span<char *const> args{argv, static_cast<std::size_t>(argc)};
 
@@ -705,7 +714,10 @@ int main(int argc, char **argv) {
     std::string_view err_view = err.what();
     if (err_view.find("unrecognised option '--help'") !=
         std::string_view::npos) {
-      // void
+      show_help = true;
+    } else if (err_view.find("unrecognised option '--help-seastar'") !=
+               std::string_view::npos) {
+      show_help = true;
     } else {
       applog.error("program options error: {}", err.what());
       return EXIT_FAILURE;
@@ -715,148 +727,150 @@ int main(int argc, char **argv) {
   // TODO: Load domain configuration
   sstring domain = "localhost.localdomain";
   sstring email_domain = "localhost.localdomain";
-
-  std::string certificate = "certificate.crt";
-  std::string privatekey = "private.key";
-
-  try {
-
-    sstring certificate_file_path = povm["certificate"].as<sstring>();
-    sstring privatekey_file_path = povm["privatekey"].as<sstring>();
-    sstring cwd = std::filesystem::current_path().string();
-
-    bool certificate_ok = false;
-    bool privatekey_ok = false;
-
-    try {
-      certificate_file_path = std::string(std::filesystem::weakly_canonical(
-          std::filesystem::path(certificate_file_path)));
-      std::ifstream certificate_file(certificate_file_path);
-      if (certificate_file.good()) {
-        certificate_ok = true;
-      } else {
-        certificate_file_path = std::string(std::filesystem::weakly_canonical(
-            std::filesystem::path(cwd.c_str()) / "certificate.crt"));
-
-        certificate_file.close();
-        certificate_file.open(certificate_file_path);
-        if (certificate_file.good()) {
-          certificate_ok = true;
-        } else {
-          applog.error("Error reading certificate file: {}",
-                       certificate_file_path);
-        }
-      }
-
-      if (certificate_ok) {
-        auto [common_name, x509_err] =
-            x509_helpers::parse_x509(certificate_file_path);
-
-        if (x509_err == std::errc()) {
-          sstring email_common_name = "user@" + common_name;
-          if (email_helpers::validate_email(email_common_name)) {
-            domain = common_name;
-            email_domain = common_name;
-          } else {
-            applog.warn("The domain on X.509 certificate is malformed. "
-                        "Auto-correcting to: {}.localdomain",
-                        common_name);
-            domain = common_name + ".localdomain";
-            email_domain = domain;
-          }
-        } else {
-          certificate_ok = false;
-          applog.error("[CRITICAL!!!] Terminating service due to invalid X.509 "
-                       "certificate file: {}",
-                       certificate_file_path);
-          return EXIT_FAILURE;
-        }
-      }
-
-      certificate = certificate_file_path;
-    } catch (std::exception_ptr ep) {
-      try {
-        std::rethrow_exception(ep);
-      } catch (const std::exception &ex) {
-        applog.error("Error on certificate file, {}", ex.what());
-      }
-    } catch (const std::exception &ex) {
-      applog.error("Error on certificate file, {}", ex.what());
-    }
-
-    try {
-      privatekey_file_path = std::string(std::filesystem::weakly_canonical(
-          std::filesystem::path(privatekey_file_path)));
-      std::ifstream privatekey_file(privatekey_file_path);
-      if (privatekey_file.good()) {
-        privatekey_ok = true;
-      } else {
-        privatekey_file_path = std::string(std::filesystem::weakly_canonical(
-            std::filesystem::path(cwd.c_str()) / "private.key"));
-        privatekey_file.close();
-        privatekey_file.open(privatekey_file_path);
-        if (privatekey_file.good()) {
-          privatekey_ok = true;
-        } else {
-          applog.error("Error reading privatekey file: {}",
-                       privatekey_file_path);
-        }
-      }
-
-      if (privatekey_ok) {
-        std::errc privatekey_ec =
-            x509_helpers::check_private_key(privatekey_file_path);
-        if (privatekey_ec != std::errc()) {
-          privatekey_ok = false;
-          applog.error("[CRITICAL!!!] Terminating service due to invalid X.509 "
-                       "private key file: {}",
-                       privatekey_file_path);
-          return EXIT_FAILURE;
-        }
-      }
-
-      privatekey = privatekey_file_path;
-    } catch (std::exception_ptr ep) {
-      try {
-        std::rethrow_exception(ep);
-      } catch (const std::exception &ex) {
-        applog.error("Error on privatekey file: {}", ex.what());
-      }
-    } catch (const std::exception &ex) {
-      applog.error("Error on privatekey file: {}", ex.what());
-    }
-
-    if (!(certificate_ok && privatekey_ok)) {
-      applog.error("[CRITICAL!!!] Terminating service due to certificate and "
-                   "private key file errors.");
-      return EXIT_FAILURE;
-    }
-  } catch (const std::exception &ex) {
-    applog.error("Error processing program options: {}", ex.what());
-  }
-
   std::string datadirectory = "/var/spool/smtp";
   bool datadir_ok = false;
 
-  try {
-    datadirectory = std::string(std::filesystem::weakly_canonical(
-        std::filesystem::path(povm["datadir"].as<sstring>())));
+  std::string certificate = "certificate.crt";
+  std::string privatekey = "private.key";
+  if (!show_help) {
+    try {
 
-    std::errc dir_ec = file_helpers::check_data_directory(datadirectory);
-    if (dir_ec == std::errc()) {
-      datadir_ok = true;
-    } else {
-      applog.error("data directory error");
+      sstring certificate_file_path = povm["certificate"].as<sstring>();
+      sstring privatekey_file_path = povm["privatekey"].as<sstring>();
+      sstring cwd = std::filesystem::current_path().string();
+
+      bool certificate_ok = false;
+      bool privatekey_ok = false;
+
+      try {
+        certificate_file_path = std::string(std::filesystem::weakly_canonical(
+            std::filesystem::path(certificate_file_path)));
+        std::ifstream certificate_file(certificate_file_path);
+        if (certificate_file.good()) {
+          certificate_ok = true;
+        } else {
+          certificate_file_path = std::string(std::filesystem::weakly_canonical(
+              std::filesystem::path(cwd.c_str()) / "certificate.crt"));
+
+          certificate_file.close();
+          certificate_file.open(certificate_file_path);
+          if (certificate_file.good()) {
+            certificate_ok = true;
+          } else {
+            applog.error("Error reading certificate file: {}",
+                         certificate_file_path);
+          }
+        }
+
+        if (certificate_ok) {
+          auto [common_name, x509_err] =
+              x509_helpers::parse_x509(certificate_file_path);
+
+          if (x509_err == std::errc()) {
+            sstring email_common_name = "user@" + common_name;
+            if (email_helpers::validate_email(email_common_name)) {
+              domain = common_name;
+              email_domain = common_name;
+            } else {
+              applog.warn("The domain on X.509 certificate is malformed. "
+                          "Auto-correcting to: {}.localdomain",
+                          common_name);
+              domain = common_name + ".localdomain";
+              email_domain = domain;
+            }
+          } else {
+            certificate_ok = false;
+            applog.error(
+                "[CRITICAL!!!] Terminating service due to invalid X.509 "
+                "certificate file: {}",
+                certificate_file_path);
+            return EXIT_FAILURE;
+          }
+        }
+
+        certificate = certificate_file_path;
+      } catch (std::exception_ptr ep) {
+        try {
+          std::rethrow_exception(ep);
+        } catch (const std::exception &ex) {
+          applog.error("Error on certificate file, {}", ex.what());
+        }
+      } catch (const std::exception &ex) {
+        applog.error("Error on certificate file, {}", ex.what());
+      }
+
+      try {
+        privatekey_file_path = std::string(std::filesystem::weakly_canonical(
+            std::filesystem::path(privatekey_file_path)));
+        std::ifstream privatekey_file(privatekey_file_path);
+        if (privatekey_file.good()) {
+          privatekey_ok = true;
+        } else {
+          privatekey_file_path = std::string(std::filesystem::weakly_canonical(
+              std::filesystem::path(cwd.c_str()) / "private.key"));
+          privatekey_file.close();
+          privatekey_file.open(privatekey_file_path);
+          if (privatekey_file.good()) {
+            privatekey_ok = true;
+          } else {
+            applog.error("Error reading privatekey file: {}",
+                         privatekey_file_path);
+          }
+        }
+
+        if (privatekey_ok) {
+          std::errc privatekey_ec =
+              x509_helpers::check_private_key(privatekey_file_path);
+          if (privatekey_ec != std::errc()) {
+            privatekey_ok = false;
+            applog.error(
+                "[CRITICAL!!!] Terminating service due to invalid X.509 "
+                "private key file: {}",
+                privatekey_file_path);
+            return EXIT_FAILURE;
+          }
+        }
+
+        privatekey = privatekey_file_path;
+      } catch (std::exception_ptr ep) {
+        try {
+          std::rethrow_exception(ep);
+        } catch (const std::exception &ex) {
+          applog.error("Error on privatekey file: {}", ex.what());
+        }
+      } catch (const std::exception &ex) {
+        applog.error("Error on privatekey file: {}", ex.what());
+      }
+
+      if (!(certificate_ok && privatekey_ok)) {
+        applog.error("[CRITICAL!!!] Terminating service due to certificate and "
+                     "private key file errors.");
+        return EXIT_FAILURE;
+      }
+    } catch (const std::exception &ex) {
+      applog.error("Error processing program options: {}", ex.what());
     }
 
-  } catch (const std::exception &ex) {
-    applog.error("Error on data directory: {}", ex.what());
-  }
+    try {
+      datadirectory = std::string(std::filesystem::weakly_canonical(
+          std::filesystem::path(povm["datadir"].as<sstring>())));
 
-  if (!datadir_ok) {
-    applog.error(
-        "[CRITICAL!!!] Terminating service due to data directory error.");
-    return EXIT_FAILURE;
+      std::errc dir_ec = file_helpers::check_data_directory(datadirectory);
+      if (dir_ec == std::errc()) {
+        datadir_ok = true;
+      } else {
+        applog.error("data directory error");
+      }
+
+    } catch (const std::exception &ex) {
+      applog.error("Error on data directory: {}", ex.what());
+    }
+
+    if (!datadir_ok) {
+      applog.error(
+          "[CRITICAL!!!] Terminating service due to data directory error.");
+      return EXIT_FAILURE;
+    }
   }
 
   app.get_options_description().add(desc);

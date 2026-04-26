@@ -30,6 +30,8 @@ static constexpr std::size_t MAX_EMAIL_DOMAINS = 12;
 
 static constexpr std::size_t SMTP_COMMAND_BUFFER_LIMIT_SIZE = 3500;
 
+static constexpr int CMD_POSITION_ZERO = 0;
+
 struct email_domains_t {
   std::array<seastar::sstring, MAX_EMAIL_DOMAINS> domains;
   std::size_t count = 0;
