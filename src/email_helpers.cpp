@@ -80,6 +80,14 @@ load_email_domains(const seastar::sstring &default_email_domain) {
   if (!env || env[0] == '\0') {
     result.domains[0] = default_email_domain;
     result.count = 1;
+
+    const seastar::sstring root_domain =
+        extract_root_domain(default_email_domain);
+    if (root_domain != default_email_domain) {
+      result.domains[1] = root_domain;
+      result.count = 2;
+    }
+
     return result;
   }
 
@@ -106,6 +114,14 @@ load_email_domains(const seastar::sstring &default_email_domain) {
   if (result.count == 0) {
     result.domains[0] = default_email_domain;
     result.count = 1;
+  }
+
+  const seastar::sstring root_domain =
+      extract_root_domain(default_email_domain);
+  if (root_domain != default_email_domain &&
+      ((result.count + 1) < MAX_EMAIL_DOMAINS)) {
+    result.count++;
+    result.domains[result.count] = root_domain;
   }
 
   return result;
@@ -214,6 +230,22 @@ std::string_view get_domain(std::string_view email) {
     return {};
   }
   return email.substr(pos + 1);
+}
+
+seastar::sstring extract_root_domain(const seastar::sstring &host) noexcept {
+  const std::string_view sv{host.data(), host.size()};
+
+  const std::size_t last = sv.rfind('.');
+  if (last == std::string_view::npos || last == 0) [[unlikely]] {
+    return host;
+  }
+
+  const std::size_t prev = sv.rfind('.', last - 1);
+  if (prev == std::string_view::npos) [[unlikely]] {
+    return host;
+  }
+
+  return seastar::sstring{sv.data() + prev + 1, sv.size() - prev - 1};
 }
 
 }; // namespace email_helpers

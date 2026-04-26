@@ -697,9 +697,6 @@ int main(int argc, char **argv) {
     ("privatekey",
       po::value<seastar::sstring>()->default_value("/etc/ssl/private/mail/private.key"),
       "X.509 private key file")
-    ("auto-x509-domain",
-      po::bool_switch()->default_value(true),
-      "Loads domain using X.509 common name value from certificate file automatically")
     ("version",
       po::bool_switch()->default_value(false),
       "Show version and exit");

@@ -66,4 +66,6 @@ email_domains_t split_email_domains(const seastar::sstring &all_email_domain,
 
 std::string_view get_domain(std::string_view email);
 
+seastar::sstring extract_root_domain(const seastar::sstring &host) noexcept;
+
 } // namespace email_helpers
