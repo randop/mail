@@ -313,12 +313,7 @@ seastar::future<> handle_connection(
           }
         }
 
-        if (is_data_ended) {
-          // trim to remove <CRLF>.<CRLF>
-          email_buffer.append(buf.get(), buf.size() - 5);
-        } else {
-          email_buffer.append(buf.get(), buf.size());
-        }
+        email_buffer.append(buf.get(), buf.size());
 
         if (email_buffer.size() >= emailfile_align) {
           applog.info("DMA_WRITE: email content <{}>", email_filename);
@@ -537,7 +532,6 @@ seastar::future<> handle_connection(
       }
     }
 
-    applog.info("emailfile.flush()...");
     co_await emailfile.flush();
 
     if (state_data_started && state_data_ended) {
