@@ -147,12 +147,12 @@ seastar::future<> handle_connection(
     const seastar::sstring email_domain, const seastar::sstring datadirectory,
     seastar::lw_shared_ptr<bool> proxy_support) {
 
-  auto [ip, ec] = ip_helpers::get_ip_address(remote);
+  auto ip_info = ip_helpers::get_ip_address(remote);
+  auto &ip = ip_info.ip;
   std::string sep(1, std::filesystem::path::preferred_separator);
   sstring email_real_filename = generate_email_filename();
   seastar::sstring email_filename = datadirectory + sep + email_real_filename;
   applog.info("New client {} connection, session: {}", remote, email_filename);
-  applog.info("Proxy support: {}", *proxy_support);
 
   std::unique_ptr<smtp_session> session;
 
@@ -182,6 +182,11 @@ seastar::future<> handle_connection(
 
   bool state_data_started = false;
   bool state_data_ended = false;
+
+  bool state_proxy_header_read = false;
+  if (*proxy_support) {
+    state_proxy_header_read = true;
+  }
 
   gate.enter();
 
@@ -230,7 +235,24 @@ seastar::future<> handle_connection(
         std::format("220 {} Service ready\r\n", domain.data())));
 
     while (active) {
-      temporary_buffer<char> buf = co_await session->in.read();
+      temporary_buffer<char> buf;
+      if (state_proxy_header_read) {
+        state_proxy_header_read = false;
+        const auto header = co_await session->in.read_exactly(16);
+        const auto *h = header.get();
+        uint16_t header_length = (h[14] << 8) | h[15];
+        auto body = co_await session->in.read_exactly(header_length);
+        auto proxy_info =
+            ip_helpers::parse_proxy_v2(header.get(), body.get(), header_length);
+        if (!proxy_info) [[unlikely]] {
+          applog.error("proxy protocol violation of client {}", remote);
+          active = false;
+          break;
+        } else {
+          ip_helpers::format_ip(*proxy_info, ip_info);
+        }
+      }
+      buf = co_await session->in.read();
       if (buf.empty()) {
         break;
       }
