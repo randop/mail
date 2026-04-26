@@ -188,6 +188,8 @@ seastar::future<> handle_connection(
     state_proxy_header_read = true;
   }
 
+  SMTP_COMMAND cmd{SMTP_COMMAND::UNKNOWN};
+
   gate.enter();
 
   try {
@@ -345,16 +347,19 @@ seastar::future<> handle_connection(
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
+              cmd = SMTP_COMMAND::EHLO;
             } else if (compare_strings_ab(p, "QUIT")) {
               applog.info("QUIT found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
+              cmd = SMTP_COMMAND::QUIT;
             } else if (compare_strings_ab(p, "AUTH")) {
               applog.info("AUTH found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 4;
+              cmd = SMTP_COMMAND::AUTH;
             } else if (compare_strings_ab(p, "DATA")) {
               applog.info("DATA found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
@@ -362,6 +367,7 @@ seastar::future<> handle_connection(
               in_data = true;
               in_cmd_boundary = true;
               cmd_pos += 4;
+              cmd = SMTP_COMMAND::DATA;
             }
           }
           if ((cmd_pos + 8) <= cmd_buffer.size()) {
@@ -371,12 +377,14 @@ seastar::future<> handle_connection(
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
+              cmd = SMTP_COMMAND::RCPT;
             }
             if (compare_strings_ab(p, "STARTTLS")) {
               applog.info("STARTTLS found at {}", cmd_pos);
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 8;
+              cmd = SMTP_COMMAND::STARTTLS;
             }
           }
           if ((cmd_pos + 10) <= cmd_buffer.size()) {
@@ -386,6 +394,7 @@ seastar::future<> handle_connection(
               cmd_start_index = cmd_pos;
               in_cmd_boundary = true;
               cmd_pos += 10;
+              cmd = SMTP_COMMAND::MAIL;
             }
           }
         }
@@ -396,7 +405,7 @@ seastar::future<> handle_connection(
           while (crlf_pos + 1 < cmd_buffer.size()) {
             if (cmd_buffer[crlf_pos] == '\r' &&
                 cmd_buffer[crlf_pos + 1] == '\n') {
-              applog.info("<CRLF> found at {}", crlf_pos);
+              applog.trace("<CRLF> found at {}", crlf_pos);
               crlf_pos += 2;
               in_command = true;
               in_crlf = true;
@@ -416,7 +425,7 @@ seastar::future<> handle_connection(
         } else {
           // clear
           cmd_view = std::string_view(cmd_buffer.data(), 0);
-          applog.info("clear cmd_view: {}", cmd_view);
+          applog.trace("clear cmd_view: {}", cmd_view);
         }
 
         if (in_command && in_crlf) {
@@ -424,7 +433,8 @@ seastar::future<> handle_connection(
           cmd_start_index = cmd_pos;
           applog.info("command: {}", cmd_view);
 
-          if (cmd_view.starts_with("EHLO ") || cmd_view.starts_with("HELO ")) {
+          if (cmd_view.starts_with("EHLO ") ||
+              cmd_view.starts_with("HELO " || cmd == SMTP_COMMAND::EHLO)) {
             ok_rcpt_count = 0;
             ok_mailfrom_count = 0;
 
@@ -445,7 +455,8 @@ seastar::future<> handle_connection(
             co_await session->logfile->write(seastar::sstring(
                 std::format("250 SIZE {}\r\n", email_size_limit)));
             co_await session->out->flush();
-          } else if (cmd_view.starts_with("RCPT TO:")) {
+          } else if (cmd_view.starts_with("RCPT TO:") ||
+                     cmd == SMTP_COMMAND::RCPT) {
             auto [email, ec] = email_helpers::extract_email_address(cmd_view);
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
@@ -467,7 +478,8 @@ seastar::future<> handle_connection(
             } else {
               co_await session->send("553 5.1.3 Bad email address syntax\r\n");
             }
-          } else if (cmd_view.starts_with("MAIL FROM:")) {
+          } else if (cmd_view.starts_with("MAIL FROM:") ||
+                     cmd == SMTP_COMMAND::MAIL) {
             auto [email, ec] = email_helpers::extract_email_address(cmd_view);
             if (ec == std::errc()) {
               co_await session->send("250 Accepted\r\n");
@@ -475,11 +487,13 @@ seastar::future<> handle_connection(
             } else {
               co_await session->send("501 5.1.3 Bad email address syntax\r\n");
             }
-          } else if (cmd_view.starts_with("STARTTLS")) {
+          } else if (cmd_view.starts_with("STARTTLS") ||
+                     cmd == SMTP_COMMAND::STARTTLS) {
             co_await session->send("220 Ready to start TLS\r\n");
             co_await session->upgrade_tls(certs);
             applog.info("Session of {} upgraded to TLS", ip);
-          } else if (cmd_view.starts_with("DATA")) {
+          } else if (cmd_view.starts_with("DATA") ||
+                     cmd == SMTP_COMMAND::DATA) {
             if (ok_rcpt_count >= 1 && ok_mailfrom_count >= 1) {
               in_data = true;
               in_command = false;
@@ -495,9 +509,11 @@ seastar::future<> handle_connection(
                 co_await session->send("503 Bad sequence of commands\r\n");
               }
             }
-          } else if (cmd_view.starts_with("AUTH")) {
+          } else if (cmd_view.starts_with("AUTH") ||
+                     cmd == SMTP_COMMAND::AUTH) {
             co_await session->send("502 Command not implemented\r\n");
-          } else if (cmd_view.starts_with("QUIT")) {
+          } else if (cmd_view.starts_with("QUIT") ||
+                     cmd == SMTP_COMMAND::QUIT) {
             co_await session->send("221 Bye\r\n");
           } else {
             co_await session->send("500 Syntax error\r\n");
@@ -507,6 +523,7 @@ seastar::future<> handle_connection(
 
           // clear
           cmd_view = std::string_view(cmd_buffer.data(), 0);
+          cmd = SMTP_COMMAND::UNKNOWN;
         }
       }
     }
