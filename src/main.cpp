@@ -32,6 +32,7 @@ this software will be made available under the specified Change License.
 
 #include <boost/program_options.hpp>
 #include <seastar/core/app-template.hh>
+#include <seastar/core/circular_buffer_fixed_capacity.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/file.hh>
 #include <seastar/core/fstream.hh>
@@ -56,6 +57,7 @@ this software will be made available under the specified Change License.
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <format>
@@ -241,7 +243,146 @@ seastar::future<> handle_connection(
     co_await session->send(seastar::sstring(
         std::format("220 {} Service ready\r\n", domain.data())));
 
+    constexpr size_t fixed_stream_capacity = 16;
+    std::vector<char> fixed_stream(fixed_stream_capacity, '\0');
+    size_t fixed_stream_size = 0;
+
+    size_t session_state_command_index = 0;
+    SMTP_COMMAND session_state_cmd{SMTP_COMMAND::UNKNOWN};
+
+    SMTP_SESSION_STATUS session_state_status{SMTP_SESSION_STATUS::COMMAND};
+
+    size_t session_state_rcpt_count = 0;
+    size_t session_state_mailfrom_count = 0;
+
     while (active) {
+      seastar::temporary_buffer<char> buffer_stream =
+          co_await session->in.read();
+
+      if (buffer_stream.empty()) {
+        break;
+      }
+
+      idle_timer.rearm(seastar::timer<>::clock::now() +
+                       std::chrono::seconds(timeout_seconds));
+
+      std::string_view buffer_view = {buffer_stream.get(),
+                                      buffer_stream.size()};
+
+      if (session_state_status == SMTP_SESSION_STATUS::COMMAND) {
+        session_state_command_index = 0;
+
+        for (const auto &[cmd, smtp_cmd] : SMTP_RFC_COMMANDS) {
+          std::string_view chunk_view = {buffer_view.data(), cmd.size()};
+          if (string_helpers::compare_string_views(chunk_view, cmd)) {
+            session_state_cmd = email_helpers::get_smtp_command(cmd);
+            session_state_command_index += cmd.size();
+            break;
+          }
+        }
+
+        if (session_state_cmd == SMTP_COMMAND::UNKNOWN) {
+          // TODO: lookup command on non-regular mode
+        }
+      }
+
+      // zero-copy view of only the last segment of buffer_stream
+      size_t last_take = std::min(buffer_stream.size(), fixed_stream_capacity);
+      size_t start_offset = buffer_stream.size() - last_take;
+      auto last_segment = buffer_stream.share(start_offset, last_take);
+
+      // append the last segment to fixed_stream
+      for (char c : last_segment) {
+        if (fixed_stream_size < fixed_stream_capacity) {
+          fixed_stream[fixed_stream_size] = c;
+          ++fixed_stream_size;
+        } else {
+          // drop oldest character and append new one
+          std::rotate(fixed_stream.begin(), fixed_stream.begin() + 1,
+                      fixed_stream.end());
+          fixed_stream.back() = c;
+        }
+      }
+
+      if (session_state_status == SMTP_SESSION_STATUS::DATA) {
+        std::string_view fixed_view(fixed_stream.data(), fixed_stream_capacity);
+        size_t pos = fixed_view.find(SMTP_DATA_END);
+        if (pos != std::string_view::npos) {
+          session_state_status = SMTP_SESSION_STATUS::COMMAND;
+          co_await session->out->write("250 OK: message queued\r\n");
+          co_await session->out->flush();
+        }
+      } else {
+        if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
+            session_state_cmd != SMTP_COMMAND::UNKNOWN) {
+          size_t pos = buffer_view.find(SMTP_CRLF, session_state_command_index);
+          if (pos != std::string_view::npos) {
+
+            auto [args, parse_ec] =
+                email_helpers::parse_smtp_line(session_state_cmd, buffer_view);
+            if (parse_ec == std::errc()) {
+              std::string_view cmd_string =
+                  email_helpers::smtp_command_string(session_state_cmd);
+              applog.info("{} command: {}{}", sid, cmd_string, args);
+
+              switch (session_state_cmd) {
+              case SMTP_COMMAND::HELO:
+              case SMTP_COMMAND::EHLO:
+                co_await session->out->write("250-Nice\r\n250-8BITMIME\r\n250-"
+                                             "SMTPUTF8\r\n250 SIZE 524000\r\n");
+                co_await session->out->flush();
+                break;
+              case SMTP_COMMAND::MAIL:                
+                auto [email, ec] = email_helpers::extract_email_address(args);
+
+                co_await session->out->write("250 Accepted\r\n");
+                co_await session->out->flush();
+                break;
+              case SMTP_COMMAND::RCPT: {
+                auto [email, ec] = email_helpers::extract_email_address(args);
+
+                break;
+              }
+              case SMTP_COMMAND::DATA:
+                session_state_status = SMTP_SESSION_STATUS::DATA;
+                co_await session->out->write(
+                    "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n");
+                co_await session->out->flush();
+                break;
+              case SMTP_COMMAND::BDAT:
+              case SMTP_COMMAND::AUTH:
+                co_await session->out->write("502 Not implemented\r\n");
+                co_await session->out->flush();
+                break;
+              case SMTP_COMMAND::QUIT:
+                co_await session->out->write("221 Bye\r\n");
+                co_await session->out->flush();
+                active = false;
+                break;
+              case SMTP_COMMAND::UNKNOWN:
+              default:
+                co_await session->out->write("500 Syntax error\r\n");
+                co_await session->out->flush();
+
+                break;
+              }
+
+            } else {
+              applog.info("{} command: {}", sid, buffer_view);
+              co_await session->out->write("500 Syntax error\r\n");
+              co_await session->out->flush();
+            }
+          }
+        }
+      }
+
+      // applog.info("buffer_stream: {}", buffer_stream);
+      // applog.info("fixed_stream: {}", fixed_stream);
+      // std::cout << "==============" << std::endl;
+    }
+
+    bool demo = false;
+    while (demo && active) {
       temporary_buffer<char> buf;
       if (state_proxy_header_read) {
         state_proxy_header_read = false;
@@ -742,7 +883,7 @@ int main(int argc, char **argv) {
   seastar::app_template app(std::move(opts));
 
   uint16_t port = 2525;
-  uint16_t default_timeout_seconds = 30;
+  uint16_t default_timeout_seconds = 120;
 
   namespace po = boost::program_options;
   po::options_description desc("Allowed options");

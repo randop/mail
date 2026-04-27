@@ -26,6 +26,8 @@
 #include <utility>
 #include <vector>
 
+#include "constants.hpp"
+
 static constexpr std::size_t MAX_EMAIL_DOMAINS = 12;
 
 static constexpr int CMD_POSITION_ZERO = 0;
@@ -38,6 +40,11 @@ struct email_domains_t {
 struct email_extract_result {
   seastar::sstring email;
   std::errc ec{};
+};
+
+struct smtp_parse_result_t {
+  std::string_view args;
+  std::errc ec = std::errc{};
 };
 
 namespace email_helpers {
@@ -65,5 +72,13 @@ email_domains_t split_email_domains(const seastar::sstring &all_email_domain,
 std::string_view get_domain(std::string_view email);
 
 seastar::sstring extract_root_domain(const seastar::sstring &host) noexcept;
+
+SMTP_COMMAND get_smtp_command(std::string_view cmd) noexcept;
+
+std::string_view smtp_command_string(const SMTP_COMMAND &cmd);
+
+smtp_parse_result_t
+parse_smtp_line(const SMTP_COMMAND &cmd,
+                const std::string_view &buffer_view) noexcept;
 
 } // namespace email_helpers

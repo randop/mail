@@ -248,4 +248,50 @@ seastar::sstring extract_root_domain(const seastar::sstring &host) noexcept {
   return seastar::sstring{sv.data() + prev + 1, sv.size() - prev - 1};
 }
 
+SMTP_COMMAND get_smtp_command(std::string_view cmd) noexcept {
+  for (const auto &[cmd_str, cmd_enum] : SMTP_RFC_COMMANDS) {
+    if (cmd.starts_with(cmd_str)) {
+      return cmd_enum;
+    }
+  }
+  return SMTP_COMMAND::UNKNOWN;
+}
+
+std::string_view smtp_command_string(const SMTP_COMMAND &cmd) {
+  for (const auto &[cmd_str, cmd_enum] : SMTP_RFC_COMMANDS) {
+    if (cmd_enum == cmd) {
+      return cmd_str;
+    }
+  }
+  return SMTP_UNKNOWN;
+}
+
+smtp_parse_result_t
+parse_smtp_line(const SMTP_COMMAND &cmd,
+                const std::string_view &buffer_view) noexcept {
+  const size_t crlf_pos = buffer_view.find(SMTP_CRLF);
+  if (crlf_pos == std::string_view::npos) {
+    return {{}, std::errc::message_size};
+  }
+
+  std::string_view line = buffer_view.substr(0, crlf_pos);
+
+  size_t space_pos = line.find(' ');
+  if (cmd == SMTP_COMMAND::MAIL || cmd == SMTP_COMMAND::RCPT) {
+    space_pos = line.find(":");
+  }
+
+  std::string_view args;
+
+  if (space_pos != std::string_view::npos) {
+    args = line.substr(space_pos + 1);
+  }
+
+  if (line.empty() || line.find_first_not_of(" \t") == std::string_view::npos) {
+    return {{}, std::errc::invalid_argument};
+  }
+
+  return {args, std::errc{}};
+}
+
 }; // namespace email_helpers
