@@ -23,4 +23,6 @@ std::errc checktest_directory(const std::string &directory);
 bool move_file_safe(const std::filesystem::path &from,
                     const std::filesystem::path &to) noexcept;
 
+std::errc delete_file(const std::string &file_path);
+
 } // namespace file_helpers

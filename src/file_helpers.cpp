@@ -90,4 +90,19 @@ bool move_file_safe(const std::filesystem::path &from,
   return !ec;
 }
 
+std::errc delete_file(const std::string &file_path) {
+  auto path = std::filesystem::path(file_path);
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) || ec) {
+    return std::errc::no_such_file_or_directory;
+  }
+
+  std::filesystem::remove(path, ec);
+  if (ec) {
+    return std::errc::permission_denied;
+  }
+
+  return std::errc();
+}
+
 } // namespace file_helpers

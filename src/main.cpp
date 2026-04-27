@@ -622,6 +622,16 @@ seastar::future<> handle_connection(
     // void
   }
 
+  if (!session_state_data_written) {
+    auto ec = file_helpers::delete_file(email_filename);
+    if (ec == std::errc()) {
+      applog.warn("{} removed empty incomplete email {}", sid, email_filename);
+    } else {
+      applog.error("{} failed to remove empty incomplete email {}", sid,
+                   email_filename);
+    }
+  }
+
   applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
 
   gate.leave();
