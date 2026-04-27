@@ -39,8 +39,8 @@ seastar::sstring generate_email_filename() {
   return out;
 }
 
-std::errc check_data_directory(const std::string &data_directory) {
-  auto path = std::filesystem::path(data_directory);
+std::errc checktest_directory(const std::string &directory) {
+  auto path = std::filesystem::path(directory);
   std::error_code ec;
   if (!std::filesystem::exists(path, ec) || ec) {
     return std::errc::no_such_file_or_directory;

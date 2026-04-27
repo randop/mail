@@ -229,7 +229,8 @@ seastar::future<> handle_connection(
     const seastar::sstring domain,
     seastar::lw_shared_ptr<email_domains_t> all_email_domains,
     const seastar::sstring email_domain, const seastar::sstring datadirectory,
-    seastar::lw_shared_ptr<bool> proxy_support) {
+    seastar::lw_shared_ptr<bool> proxy_support,
+    seastar::lw_shared_ptr<sstring> logdirectory) {
 
   sstring sid_uuid = uuid_helpers::generate_v7();
   std::string_view sid_view(sid_uuid.data(), sid_uuid.size());
@@ -240,8 +241,9 @@ seastar::future<> handle_connection(
   std::string sep(1, std::filesystem::path::preferred_separator);
   sstring email_real_filename = generate_email_filename();
   seastar::sstring email_filename = datadirectory + sep + email_real_filename;
+  sstring log_filename = *logdirectory + sep + generate_random_logname();
   applog.info("{} new client {} connection, session logging on: {}", sid,
-              remote, email_filename);
+              remote, log_filename);
 
   std::unique_ptr<smtp_session> session;
 
@@ -255,8 +257,6 @@ seastar::future<> handle_connection(
   gate.enter();
 
   try {
-    sstring log_filename = datadirectory + sep + generate_random_logname();
-
     seastar::file logfile = co_await open_file_dma(
         log_filename, open_flags::rw | open_flags::create);
 
@@ -625,7 +625,8 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       const seastar::sstring privatekey,
       seastar::lw_shared_ptr<email_domains_t> all_email_domains,
       const seastar::sstring email_domain, const seastar::sstring datadirectory,
-      seastar::lw_shared_ptr<bool> proxy_support) {
+      seastar::lw_shared_ptr<bool> proxy_support,
+      seastar::lw_shared_ptr<sstring> logdirectory) {
 
   applog.trace("Loading X.509 certificates {}, {} ...", certificate,
                privatekey);
@@ -672,7 +673,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
                               gate, as, certs, email_size_limit, domain,
                               all_email_domains, email_domain, datadirectory,
-                              proxy_support)
+                              proxy_support, logdirectory)
           .handle_exception([=](std::exception_ptr ep) {
             try {
               std::rethrow_exception(ep);
@@ -751,6 +752,9 @@ int main(int argc, char **argv) {
     ("datadir",
       po::value<seastar::sstring>()->default_value("/var/spool/smtp"),
       "Data directory")
+    ("logdir",
+      po::value<seastar::sstring>()->default_value("/var/log/smtp"),
+      "Log directory")
     ("port",
       po::value<uint16_t>()->default_value(port),
       std::format("SMTP port to listen on (default: {})", port).data())
@@ -791,7 +795,9 @@ int main(int argc, char **argv) {
   sstring domain = "localhost.localdomain";
   sstring email_domain = "localhost.localdomain";
   std::string datadirectory = "/var/spool/smtp";
+  std::string logdirectory = "/var/log/smtp";
   bool datadir_ok = false;
+  bool logdir_ok = false;
 
   std::string certificate = "certificate.crt";
   std::string privatekey = "private.key";
@@ -919,7 +925,7 @@ int main(int argc, char **argv) {
       datadirectory = std::string(std::filesystem::weakly_canonical(
           std::filesystem::path(povm["datadir"].as<sstring>())));
 
-      std::errc dir_ec = file_helpers::check_data_directory(datadirectory);
+      std::errc dir_ec = file_helpers::checktest_directory(datadirectory);
       if (dir_ec == std::errc()) {
         datadir_ok = true;
       } else {
@@ -935,6 +941,27 @@ int main(int argc, char **argv) {
           "[CRITICAL!!!] Terminating service due to data directory error.");
       return EXIT_FAILURE;
     }
+
+    try {
+      logdirectory = std::string(std::filesystem::weakly_canonical(
+          std::filesystem::path(povm["logdir"].as<sstring>())));
+
+      std::errc dir_ec = file_helpers::checktest_directory(logdirectory);
+      if (dir_ec == std::errc()) {
+        logdir_ok = true;
+      } else {
+        applog.error("log directory error");
+      }
+
+    } catch (const std::exception &ex) {
+      applog.error("Error on log directory: {}", ex.what());
+    }
+
+    if (!logdir_ok) {
+      applog.error(
+          "[CRITICAL!!!] Terminating service due to log directory error.");
+      return EXIT_FAILURE;
+    }
   }
 
   app.get_options_description().add(desc);
@@ -943,6 +970,7 @@ int main(int argc, char **argv) {
       argc, argv,
       [&app, domain_data = std::move(domain),
        email_data = std::move(email_domain), datadir = std::move(datadirectory),
+       logdir = std::move(logdirectory),
        certificate_file_path = std::move(certificate),
        privatekey_file_path = std::move(privatekey)]() -> seastar::future<> {
         auto &cfg = app.configuration();
@@ -980,15 +1008,19 @@ int main(int argc, char **argv) {
         seastar::lw_shared_ptr<bool> proxy_support =
             seastar::make_lw_shared<bool>(cfg["proxy-support"].as<bool>());
 
+        seastar::lw_shared_ptr<sstring> logdirectory =
+            seastar::make_lw_shared<sstring>(logdir);
+
         auto shards_future = seastar::smp::invoke_on_all(
             [port, &abort_sources, &gate, timeout_seconds,
              email_size_limit = email_size_limit, domain = sstring(domain),
-             datadirectory, certificate, privatekey, email_domain,
+             datadirectory, logdirectory, certificate, privatekey, email_domain,
              all_email_domains, proxy_support] {
               return serve(port, abort_sources.local(), gate.local(),
                            timeout_seconds, email_size_limit, domain,
                            certificate, privatekey, all_email_domains,
-                           email_domain, datadirectory, proxy_support);
+                           email_domain, datadirectory, proxy_support,
+                           logdirectory);
             });
 
         applog.info("server listening on 0.0.0.0 port {}", port);

@@ -18,7 +18,7 @@ seastar::sstring generate_random_logname();
 
 seastar::sstring generate_email_filename();
 
-std::errc check_data_directory(const std::string &path);
+std::errc checktest_directory(const std::string &directory);
 
 bool move_file_safe(const std::filesystem::path &from,
                     const std::filesystem::path &to) noexcept;
