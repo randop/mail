@@ -67,31 +67,6 @@ std::errc check_data_directory(const std::string &data_directory) {
     return std::errc::permission_denied;
   }
 
-  std::string sep(1, std::filesystem::path::preferred_separator);
-  auto maildir_path =
-      std::filesystem::path(data_directory + sep + "maildir" + sep + "cur");
-  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
-    return std::errc::permission_denied;
-  }
-
-  maildir_path =
-      std::filesystem::path(data_directory + sep + "maildir" + sep + "new");
-  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
-    return std::errc::permission_denied;
-  }
-
-  maildir_path =
-      std::filesystem::path(data_directory + sep + "maildir" + sep + "tmp");
-  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
-    return std::errc::permission_denied;
-  }
-
-  maildir_path =
-      std::filesystem::path(data_directory + sep + "maildir" + sep + "spam");
-  if (!std::filesystem::create_directories(maildir_path, ec) && ec) {
-    return std::errc::permission_denied;
-  }
-
   return std::errc();
 }
 
