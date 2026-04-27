@@ -178,35 +178,33 @@ struct smtp_session {
     is_tls = true;
   }
 
-  future<> commit_message(seastar::file &logfile,
+  future<> commit_message(seastar::lw_shared_ptr<dma_aligned_writer> logwriter,
                           uint64_t &session_state_logfile_pos,
                           seastar::sstring message) {
     if (message.empty()) {
       co_return;
     }
 
-    const size_t align = logfile.disk_write_dma_alignment();
+    session_state_logfile_pos += message.size();
 
-    // write to logfile using aligned DMA
-    {
-      auto log_buf =
-          seastar::temporary_buffer<char>::aligned(align, message.size());
-      std::memcpy(log_buf.get_write(), message.data(), message.size());
-
-      size_t written = co_await logfile.dma_write(
-          session_state_logfile_pos, log_buf.get(), message.size());
-
-      session_state_logfile_pos += written;
-
-      while (written < message.size()) {
-        log_buf.trim_front(written);
-        written = co_await logfile.dma_write(session_state_logfile_pos,
-                                             log_buf.get(), log_buf.size());
-        session_state_logfile_pos += written;
+    try {
+      co_await logwriter->write(message.data(), message.size());
+    } catch (const std::exception_ptr &ep) {
+      try {
+        std::rethrow_exception(ep);
+      } catch (const std::system_error &e) {
+        applog.error("commit log system error (errno {}): {} - what(): {}",
+                     e.code().value(), e.code().message(), e.what());
+      } catch (const std::exception &e) {
+        applog.error("commit log exception caught: what() = {}", e.what());
+      } catch (...) {
+        applog.error("unknown exception while committing log");
       }
+    } catch (const std::exception &ex) {
+      applog.error("log commit error: {}", ex.what());
     }
 
-    co_await out->write(std::move(message));
+    co_await out->write(message);
     co_await out->flush();
 
     co_return;
@@ -257,13 +255,16 @@ seastar::future<> handle_connection(
   gate.enter();
 
   try {
-    seastar::file logfile = co_await open_file_dma(
+    seastar::file log_dma_file = co_await open_file_dma(
         log_filename, open_flags::rw | open_flags::create);
 
     seastar::file emailfile = co_await seastar::open_file_dma(
         email_filename, seastar::open_flags::rw | seastar::open_flags::create);
 
     dma_aligned_writer email_writer(std::move(emailfile));
+    dma_aligned_writer log_writer(std::move(log_dma_file));
+    seastar::lw_shared_ptr logfile =
+        seastar::make_lw_shared<dma_aligned_writer>(std::move(log_writer));
 
     session = std::make_unique<smtp_session>(std::move(cs));
 
@@ -412,18 +413,8 @@ seastar::future<> handle_connection(
           }
         }
       } else {
-        size_t written = co_await logfile.dma_write(session_state_logfile_pos,
-                                                    buffer_stream.get(),
-                                                    buffer_stream.size());
-        session_state_logfile_pos += written;
-
-        while (written < buffer_stream.size()) {
-          buffer_stream.trim_front(written);
-          written = co_await logfile.dma_write(session_state_logfile_pos,
-                                               buffer_stream.get(),
-                                               buffer_stream.size());
-          session_state_logfile_pos += written;
-        }
+        co_await logfile->write(buffer_stream.get(), buffer_stream.size());
+        session_state_logfile_pos += buffer_stream.size();
 
         if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
             session_state_cmd != SMTP_COMMAND::UNKNOWN) {
@@ -568,7 +559,7 @@ seastar::future<> handle_connection(
     }
 
     // flush and commit DMA files
-    co_await seastar::when_all_succeed(logfile.close(),
+    co_await seastar::when_all_succeed(logfile->flush_final(),
                                        email_writer.flush_final());
 
     if (session_state_transaction_ok) {
