@@ -251,6 +251,7 @@ seastar::future<> handle_connection(
   bool session_state_transaction_ok = false;
   uint64_t session_state_emailfile_pos = 0;
   uint64_t session_state_logfile_pos = 0;
+  bool session_state_data_written = false;
 
   gate.enter();
 
@@ -390,6 +391,7 @@ seastar::future<> handle_connection(
       if (session_state_status == SMTP_SESSION_STATUS::DATA) {
         session_state_emailfile_pos += email_stream.size();
         co_await email_writer.write(email_stream.get(), email_stream.size());
+        session_state_data_written = true;
 
         std::string_view fixed_view(fixed_stream.data(), fixed_stream_capacity);
         size_t pos = fixed_view.find(SMTP_DATA_END);
@@ -517,6 +519,20 @@ seastar::future<> handle_connection(
                 }
                 break;
               }
+              case SMTP_COMMAND::RSET: {
+                session_state_rcpt_count = 0;
+                session_state_mailfrom_count = 0;
+                sstring message = "250 OK\r\n";
+                co_await session->commit_message(
+                    logfile, session_state_logfile_pos, std::move(message));
+                break;
+              }
+              case SMTP_COMMAND::NOOP: {
+                sstring message = "250 OK\r\n";
+                co_await session->commit_message(
+                    logfile, session_state_logfile_pos, std::move(message));
+                break;
+              }
               case SMTP_COMMAND::BDAT:
               case SMTP_COMMAND::AUTH: {
                 sstring message = "502 Command not implemented\r\n";
@@ -570,7 +586,9 @@ seastar::future<> handle_connection(
                   sid, log_filename, ip);
     }
 
-    applog.info("{} new mail received on {}", sid, email_filename);
+    if (session_state_data_written) {
+      applog.info("{} new mail received on {}", sid, email_filename);
+    }
 
   } catch (const seastar::timed_out_error &err) {
     applog.warn("{} client {} idle timeout", sid, ip);
@@ -592,6 +610,8 @@ seastar::future<> handle_connection(
   idle_timer.cancel();
 
   try {
+    session->cs.shutdown_input();
+    session->cs.shutdown_output();
     co_await session->in.close();
   } catch (...) {
     // void

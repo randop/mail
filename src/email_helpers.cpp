@@ -279,6 +279,9 @@ parse_smtp_line(const SMTP_COMMAND &cmd,
   size_t space_pos = line.find(' ');
   if (cmd == SMTP_COMMAND::MAIL || cmd == SMTP_COMMAND::RCPT) {
     space_pos = line.find(":");
+  } else if (cmd == SMTP_COMMAND::RSET || cmd == SMTP_COMMAND::NOOP ||
+             cmd == SMTP_COMMAND::QUIT) {
+    return {{}, std::errc{}};
   }
 
   std::string_view args;
