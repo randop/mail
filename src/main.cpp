@@ -983,6 +983,7 @@ int main(int argc, char **argv) {
         sstring email_domain = sstring(email_data);
 
         sstring datadirectory = sstring(datadir);
+        sstring log_directory = sstring(logdir);
 
         sstring certificate = sstring(certificate_file_path);
         sstring privatekey = sstring(privatekey_file_path);
@@ -1009,7 +1010,7 @@ int main(int argc, char **argv) {
             seastar::make_lw_shared<bool>(cfg["proxy-support"].as<bool>());
 
         seastar::lw_shared_ptr<sstring> logdirectory =
-            seastar::make_lw_shared<sstring>(logdir);
+            seastar::make_lw_shared<sstring>(std::move(log_directory));
 
         auto shards_future = seastar::smp::invoke_on_all(
             [port, &abort_sources, &gate, timeout_seconds,
