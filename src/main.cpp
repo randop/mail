@@ -56,6 +56,7 @@ this software will be made available under the specified Change License.
 #include <seastar/util/tmp_file.hh>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -308,14 +309,6 @@ seastar::future<> handle_connection(
     bool session_state_proxy_header_read = false;
     if (*proxy_support) {
       session_state_proxy_header_read = true;
-    } else {
-      sstring ready = std::format("220 {} Service ready\r\n", domain.data());
-      co_await session->commit_message(logfile, session_state_logfile_pos,
-                                       std::move(ready));
-    }
-
-    while (active) {
-      seastar::temporary_buffer<char> buffer_stream;
       if (session_state_proxy_header_read) {
         session_state_proxy_header_read = false;
         const auto header = co_await session->in.read_exactly(16);
@@ -327,7 +320,6 @@ seastar::future<> handle_connection(
         if (!proxy_info) [[unlikely]] {
           applog.error("{} proxy protocol violation of client {}", sid, remote);
           active = false;
-          break;
         } else {
           ip_helpers::format_ip(*proxy_info, ip_info);
           applog.info("{} detected real ip {} of client {}", sid, ip, remote);
@@ -338,28 +330,37 @@ seastar::future<> handle_connection(
                                            std::move(ready));
         }
       }
+    } else {
+      sstring ready = std::format("220 {} Service ready\r\n", domain.data());
+      co_await session->commit_message(logfile, session_state_logfile_pos,
+                                       std::move(ready));
+    }
 
-      buffer_stream = co_await session->in.read();
-
+    while (active) {
+      seastar::temporary_buffer<char> buffer_stream =
+          co_await session->in.read();
       if (buffer_stream.empty()) {
         break;
       }
 
       auto email_stream = buffer_stream.share();
+      auto command_stream = buffer_stream.share();
 
       idle_timer.rearm(seastar::timer<>::clock::now() +
                        std::chrono::seconds(timeout_seconds));
 
-      std::string_view buffer_view = {buffer_stream.get(),
-                                      buffer_stream.size()};
+      std::string_view buffer_view = {command_stream.get(),
+                                      command_stream.size()};
 
       if (session_state_status == SMTP_SESSION_STATUS::COMMAND) {
         session_state_command_index = 0;
 
+        seastar::sstring line(command_stream.get(), command_stream.size());
+
         for (const auto &[cmd, smtp_cmd] : SMTP_RFC_COMMANDS) {
-          std::string_view chunk_view = {buffer_view.data(), cmd.size()};
+          std::string_view chunk_view = {line.data(), cmd.size()};
           if (string_helpers::compare_string_views(chunk_view, cmd)) {
-            session_state_cmd = email_helpers::get_smtp_command(cmd);
+            session_state_cmd = smtp_cmd;
             session_state_command_index += cmd.size();
             break;
           }
@@ -420,15 +421,16 @@ seastar::future<> handle_connection(
 
         if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
             session_state_cmd != SMTP_COMMAND::UNKNOWN) {
-          size_t pos = buffer_view.find(SMTP_CRLF, session_state_command_index);
+          size_t pos = buffer_view.find(SMTP_CRLF);
           if (pos != std::string_view::npos) {
 
             auto [args, parse_ec] =
                 email_helpers::parse_smtp_line(session_state_cmd, buffer_view);
+
             if (parse_ec == std::errc()) {
               std::string_view cmd_string =
                   email_helpers::smtp_command_string(session_state_cmd);
-              applog.info("{} command: {}{}", sid, cmd_string, args);
+              applog.info("{} parsed command: {} {}", sid, cmd_string, args);
 
               switch (session_state_cmd) {
               case SMTP_COMMAND::HELO:
@@ -534,6 +536,9 @@ seastar::future<> handle_connection(
                 break;
               }
               case SMTP_COMMAND::BDAT:
+              case SMTP_COMMAND::VRFY:
+              case SMTP_COMMAND::SEND:
+              case SMTP_COMMAND::SOML:
               case SMTP_COMMAND::AUTH: {
                 sstring message = "502 Command not implemented\r\n";
                 co_await session->commit_message(
@@ -555,13 +560,18 @@ seastar::future<> handle_connection(
                 break;
               }
 
-            } else {
-              applog.info("{} command: {}", sid, buffer_view);
-              sstring message = "500 Syntax error\r\n";
-              co_await session->commit_message(
-                  logfile, session_state_logfile_pos, std::move(message));
+              // reset
+              if (session_state_status == SMTP_SESSION_STATUS::COMMAND) {
+                session_state_cmd = SMTP_COMMAND::UNKNOWN;
+              }
             }
           }
+        } else if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
+                   session_state_cmd == SMTP_COMMAND::UNKNOWN) {
+          applog.warn("{} unknown command: {}", sid, buffer_view);
+          sstring message = "500 Syntax error, command unrecognized\r\n";
+          co_await session->commit_message(logfile, session_state_logfile_pos,
+                                           std::move(message));
         }
 
         if (session_state_logfile_pos > SMTP_COMMAND_BUFFER_SIZE_LIMIT) {

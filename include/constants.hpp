@@ -58,25 +58,24 @@ enum class SMTP_COMMAND : uint8_t {
 | **SEND**    | `SEND FROM:<user@example.org>`                      | Deprecated (send to terminal) |
 | **SOML**    | `SOML FROM:<user@example.org>`                      | Deprecated (Send or Mail) |
 ***/
-/*** IMPORTANT: Padded spaces exist for smtp parser exact matching ***/
 // clang-format on
 constexpr std::array<std::pair<std::string_view, SMTP_COMMAND>, 16>
-    SMTP_RFC_COMMANDS = {{{"HELO ", SMTP_COMMAND::HELO},
-                          {"EHLO ", SMTP_COMMAND::EHLO},
+    SMTP_RFC_COMMANDS = {{{"HELO", SMTP_COMMAND::HELO},
+                          {"EHLO", SMTP_COMMAND::EHLO},
                           {"MAIL FROM:", SMTP_COMMAND::MAIL},
                           {"RCPT TO:", SMTP_COMMAND::RCPT},
                           {"DATA", SMTP_COMMAND::DATA},
                           {"RSET", SMTP_COMMAND::RSET},
                           {"QUIT", SMTP_COMMAND::QUIT},
                           {"NOOP", SMTP_COMMAND::NOOP},
-                          {"VRFY ", SMTP_COMMAND::VRFY},
-                          {"EXPN ", SMTP_COMMAND::EXPN},
+                          {"VRFY", SMTP_COMMAND::VRFY},
+                          {"EXPN", SMTP_COMMAND::EXPN},
                           {"HELP", SMTP_COMMAND::HELP},
-                          {"AUTH ", SMTP_COMMAND::AUTH},
+                          {"AUTH", SMTP_COMMAND::AUTH},
                           {"STARTTLS", SMTP_COMMAND::STARTTLS},
-                          {"BDAT ", SMTP_COMMAND::BDAT},
-                          {"SEND ", SMTP_COMMAND::SEND},
-                          {"SOML ", SMTP_COMMAND::SOML}}};
+                          {"BDAT", SMTP_COMMAND::BDAT},
+                          {"SEND", SMTP_COMMAND::SEND},
+                          {"SOML", SMTP_COMMAND::SOML}}};
 
 enum class SMTP_SESSION_STATUS : uint8_t {
   UNKNOWN,

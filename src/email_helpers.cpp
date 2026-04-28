@@ -277,10 +277,12 @@ parse_smtp_line(const SMTP_COMMAND &cmd,
   std::string_view line = buffer_view.substr(0, crlf_pos);
 
   size_t space_pos = line.find(' ');
-  if (cmd == SMTP_COMMAND::MAIL || cmd == SMTP_COMMAND::RCPT) {
+  if (cmd == SMTP_COMMAND::MAIL || cmd == SMTP_COMMAND::RCPT ||
+      cmd == SMTP_COMMAND::SEND || cmd == SMTP_COMMAND::SOML) {
     space_pos = line.find(":");
   } else if (cmd == SMTP_COMMAND::RSET || cmd == SMTP_COMMAND::NOOP ||
-             cmd == SMTP_COMMAND::QUIT) {
+             cmd == SMTP_COMMAND::QUIT || cmd == SMTP_COMMAND::VRFY ||
+             cmd == SMTP_COMMAND::STARTTLS) {
     return {{}, std::errc{}};
   }
 
