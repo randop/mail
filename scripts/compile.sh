@@ -15,6 +15,7 @@ export CMAKE_PREFIX_PATH="${OPT_PREFIX}/lksctp/current:${CMAKE_PREFIX_PATH}"
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/colm-suite/current:${CMAKE_PREFIX_PATH}"
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/valgrind/current:${CMAKE_PREFIX_PATH}"
 export CMAKE_PREFIX_PATH="${OPT_PREFIX}/yamlcpp/current:${CMAKE_PREFIX_PATH}"
+export CMAKE_PREFIX_PATH="${OPT_PREFIX}/liburing/current:${CMAKE_PREFIX_PATH}"
 
 ### ***verbose***
 # echo "CMAKE_PREFIX_PATH: $CMAKE_PREFIX_PATH"

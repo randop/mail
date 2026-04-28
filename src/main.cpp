@@ -1003,7 +1003,7 @@ int main(int argc, char **argv) {
        email_data = std::move(email_domain), datadir = std::move(datadirectory),
        logdir = std::move(logdirectory),
        certificate_file_path = std::move(certificate),
-       privatekey_file_path = std::move(privatekey)]() -> seastar::future<> {
+       privatekey_file_path = std::move(privatekey)]() mutable -> seastar::future<> {
         auto &cfg = app.configuration();
 
         size_t email_size_limit = DEFAULT_EMAIL_SIZE_LIMIT;
