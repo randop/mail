@@ -33,3 +33,55 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+# Build directories
+build/
+.build/
+meson-private/
+meson-info/
+meson-logs/
+.cache/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+*~
+
+### CMake ###
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+### CMake Patch ###
+CMakeUserPresets.json
+
+# External projects
+*-prefix/
+
+# self-signed certificates
+cert.pem
+key.pem
+certificate.crt
+private.key
+
+# email files
+*.eml
+
+# smtp logs
+smtp*.log
