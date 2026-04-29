@@ -72,6 +72,7 @@ this software will be made available under the specified Change License.
 #include <vector>
 
 #include "constants.hpp"
+#include "dma_file_writer.hpp"
 #include "email_helpers.hpp"
 #include "file_helpers.hpp"
 #include "ip_helpers.hpp"
@@ -88,72 +89,6 @@ using namespace string_helpers;
 using namespace file_helpers;
 
 static seastar::logger applog("smtp-server");
-
-class dma_aligned_writer {
-public:
-  dma_aligned_writer(seastar::file f) : _file(std::move(f)) {
-    _align = _file.disk_write_dma_alignment();
-    _buffer = seastar::temporary_buffer<char>(_align);
-  }
-
-  seastar::future<> write(const char *data, size_t size) {
-    size_t offset = 0;
-
-    while (offset < size) {
-      size_t space = _align - _buf_used;
-      size_t to_copy = std::min(space, size - offset);
-
-      memcpy(_buffer.get_write() + _buf_used, data + offset, to_copy);
-
-      _buf_used += to_copy;
-      offset += to_copy;
-
-      if (_buf_used == _align) {
-        co_await flush_aligned();
-      }
-    }
-  }
-
-  seastar::future<> flush_final() {
-    if (_buf_used == 0) {
-      co_return;
-    }
-
-    // pad remaining bytes
-    memset(_buffer.get_write() + _buf_used, 0, _align - _buf_used);
-
-    co_await write_all(_buffer.get(), _align);
-    _buf_used = 0;
-  }
-
-private:
-  seastar::file _file;
-  uint64_t _pos{0};
-  size_t _align{4096};
-
-  seastar::temporary_buffer<char> _buffer;
-  size_t _buf_used{0};
-
-  seastar::future<> flush_aligned() {
-    co_await write_all(_buffer.get(), _align);
-    _buf_used = 0;
-  }
-
-  seastar::future<> write_all(const char *data, size_t size) {
-    size_t written = 0;
-
-    while (written < size) {
-      auto n = co_await _file.dma_write(_pos, data + written, size - written);
-
-      if (n == 0) {
-        throw std::runtime_error("dma_write progress error");
-      }
-
-      written += n;
-      _pos += n;
-    }
-  }
-};
 
 struct smtp_session {
   connected_socket cs;
@@ -179,7 +114,7 @@ struct smtp_session {
     is_tls = true;
   }
 
-  future<> commit_message(seastar::lw_shared_ptr<dma_aligned_writer> logwriter,
+  future<> commit_message(seastar::lw_shared_ptr<dma_file_writer> logwriter,
                           uint64_t &session_state_logfile_pos,
                           seastar::sstring message) {
     if (message.empty()) {
@@ -256,17 +191,26 @@ seastar::future<> handle_connection(
 
   gate.enter();
 
+  std::optional<seastar::file> log_dma_file;
+  std::optional<seastar::file> emailfile;
+  std::optional<dma_file_writer> email_writer;
+  std::optional<dma_file_writer> log_writer;
+  std::optional<seastar::lw_shared_ptr<dma_file_writer>> log_dma_file_writer;
+
   try {
-    seastar::file log_dma_file = co_await open_file_dma(
-        log_filename, open_flags::rw | open_flags::create);
+    log_dma_file.emplace(co_await open_file_dma(
+        log_filename, open_flags::rw | open_flags::create));
 
-    seastar::file emailfile = co_await seastar::open_file_dma(
-        email_filename, seastar::open_flags::rw | seastar::open_flags::create);
+    emailfile.emplace(co_await seastar::open_file_dma(
+        email_filename, seastar::open_flags::rw | seastar::open_flags::create));
 
-    dma_aligned_writer email_writer(std::move(emailfile));
-    dma_aligned_writer log_writer(std::move(log_dma_file));
-    seastar::lw_shared_ptr logfile =
-        seastar::make_lw_shared<dma_aligned_writer>(std::move(log_writer));
+    email_writer.emplace(std::move(emailfile.value()));
+    log_writer.emplace(std::move(log_dma_file.value()));
+    log_dma_file_writer.emplace(seastar::make_lw_shared<dma_file_writer>(
+        std::move(log_writer.value())));
+
+    seastar::lw_shared_ptr<dma_file_writer> logfile =
+        log_dma_file_writer.value();
 
     session = std::make_unique<smtp_session>(std::move(cs));
 
@@ -391,7 +335,7 @@ seastar::future<> handle_connection(
 
       if (session_state_status == SMTP_SESSION_STATUS::DATA) {
         session_state_emailfile_pos += email_stream.size();
-        co_await email_writer.write(email_stream.get(), email_stream.size());
+        co_await email_writer->write(email_stream.get(), email_stream.size());
         session_state_data_written = true;
 
         std::string_view fixed_view(fixed_stream.data(), fixed_stream_capacity);
@@ -584,22 +528,6 @@ seastar::future<> handle_connection(
       }
     }
 
-    // flush and commit DMA files
-    co_await seastar::when_all_succeed(logfile->flush_final(),
-                                       email_writer.flush_final());
-
-    if (session_state_transaction_ok) {
-      applog.info("{} written client {} session logs on {}", sid, ip,
-                  log_filename);
-    } else {
-      applog.warn("{} email transaction failure, see logs on {} on client {}",
-                  sid, log_filename, ip);
-    }
-
-    if (session_state_data_written) {
-      applog.info("{} new mail received on {}", sid, email_filename);
-    }
-
   } catch (const seastar::timed_out_error &err) {
     applog.warn("{} client {} idle timeout", sid, ip);
   } catch (const std::exception_ptr &ep) {
@@ -615,6 +543,37 @@ seastar::future<> handle_connection(
     }
   } catch (const std::exception &ex) {
     applog.warn("{} connection {} error: {}", sid, ip, ex.what());
+  }
+
+  try {
+    // flush and commit DMA files
+    co_await seastar::when_all_succeed(log_dma_file_writer.value()->close(),
+                                       email_writer.value().close());
+
+    if (session_state_transaction_ok) {
+      applog.info("{} written client {} session logs on {}", sid, ip,
+                  log_filename);
+    } else {
+      applog.warn("{} email transaction failure, see logs on {} on client {}",
+                  sid, log_filename, ip);
+    }
+
+    if (session_state_data_written) {
+      applog.info("{} new mail received on {}", sid, email_filename);
+    }
+  } catch (const std::exception_ptr &ep) {
+    try {
+      std::rethrow_exception(ep);
+    } catch (const std::system_error &e) {
+      applog.error("{} system error (errno {}): {} - what(): {}", sid,
+                   e.code().value(), e.code().message(), e.what());
+    } catch (const std::exception &e) {
+      applog.error("{} exception caught: what() = {}", sid, e.what());
+    } catch (...) {
+      applog.error("{} unknown exception on file operations", sid);
+    }
+  } catch (const std::exception &ex) {
+    applog.warn("{} file operations {} error: {}", sid, ip, ex.what());
   }
 
   idle_timer.cancel();
@@ -1003,7 +962,8 @@ int main(int argc, char **argv) {
        email_data = std::move(email_domain), datadir = std::move(datadirectory),
        logdir = std::move(logdirectory),
        certificate_file_path = std::move(certificate),
-       privatekey_file_path = std::move(privatekey)]() mutable -> seastar::future<> {
+       privatekey_file_path =
+           std::move(privatekey)]() mutable -> seastar::future<> {
         auto &cfg = app.configuration();
 
         size_t email_size_limit = DEFAULT_EMAIL_SIZE_LIMIT;
