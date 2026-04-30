@@ -1,43 +1,152 @@
 #include "email_helpers.hpp"
 
 namespace email_helpers {
+
 bool is_atext(char c) noexcept {
-  return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' ||
-         c == '%' || c == '+' || c == '-';
+  switch (c) {
+  case '!':
+  case '#':
+  case '$':
+  case '%':
+  case '&':
+  case '\'':
+  case '*':
+  case '+':
+  case '/':
+  case '=':
+  case '?':
+  case '^':
+  case '_':
+  case '`':
+  case '{':
+  case '|':
+  case '}':
+  case '~':
+  case '-':
+    return true;
+  default:
+    return std::isalnum(static_cast<unsigned char>(c));
+  }
+}
+
+bool is_qtext(char c) noexcept {
+  return (c >= 33 && c <= 126 && c != '"' && c != '\\');
 }
 
 bool is_domain_char(char c) noexcept {
-  return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-';
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '.';
 }
 
-bool validate_email(std::string_view v) noexcept {
-  auto at = v.find('@');
-  if (at == std::string_view::npos || at == 0 || at == v.size() - 1) {
+bool validate_local(std::string_view local) noexcept {
+  if (local.empty()) {
     return false;
   }
 
-  auto local = v.substr(0, at);
-  auto domain = v.substr(at + 1);
+  if (local.front() == '"') {
+    if (local.size() < 2 || local.back() != '"') {
+      return false;
+    }
 
-  // local-part
+    bool escape = false;
+    for (size_t i = 1; i < local.size() - 1; ++i) {
+      char c = local[i];
+
+      if (escape) {
+        if (static_cast<unsigned char>(c) > 127) {
+          return false;
+        }
+        escape = false;
+        continue;
+      }
+
+      if (c == '\\') {
+        escape = true;
+        continue;
+      }
+
+      if (!is_qtext(c)) {
+        return false;
+      }
+    }
+
+    return !escape;
+  }
+
+  if (local.front() == '.' || local.back() == '.') {
+    return false;
+  }
+
+  bool prev_dot = false;
   for (char c : local) {
+    if (c == '.') {
+      if (prev_dot) {
+        return false;
+      }
+      prev_dot = true;
+      continue;
+    }
     if (!is_atext(c)) {
       return false;
     }
+    prev_dot = false;
   }
 
-  // domain must contain at least one dot
-  if (domain.find('.') == std::string_view::npos) {
+  return true;
+}
+
+bool validate_domain(std::string_view domain) noexcept {
+  if (domain.size() < 3) {
     return false;
   }
+
+  bool has_dot = false;
+  bool label_start = true;
+  char prev = '\0';
 
   for (char c : domain) {
     if (!is_domain_char(c)) {
       return false;
     }
+
+    if (c == '.') {
+      if (label_start || prev == '.') {
+        return false;
+      }
+      if (prev == '-') {
+        return false;
+      }
+      has_dot = true;
+      label_start = true;
+    } else {
+      if (label_start && c == '-') {
+        return false;
+      }
+      label_start = false;
+    }
+
+    prev = c;
+  }
+
+  if (prev == '-' || prev == '.') {
+    return false;
+  }
+  if (!has_dot) {
+    return false;
   }
 
   return true;
+}
+
+bool validate_email(std::string_view v) noexcept {
+  const auto at = v.find('@');
+  if (at == std::string_view::npos || at == 0 || at + 1 >= v.size()) {
+    return false;
+  }
+
+  const auto local = v.substr(0, at);
+  const auto domain = v.substr(at + 1);
+
+  return validate_local(local) && validate_domain(domain);
 }
 
 seastar::sstring join_email_domains(const email_domains_t &domains) noexcept {

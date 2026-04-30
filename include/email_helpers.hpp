@@ -54,7 +54,13 @@ email_extract_result extract_email_address(std::string_view sv);
 
 bool is_atext(char c) noexcept;
 
+bool is_qtext(char c) noexcept;
+
 bool is_domain_char(char c) noexcept;
+
+bool validate_local(std::string_view local) noexcept;
+
+bool validate_domain(std::string_view domain) noexcept;
 
 bool validate_email(std::string_view v) noexcept;
 
