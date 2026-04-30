@@ -374,7 +374,7 @@ seastar::future<> handle_connection(
             if (parse_ec == std::errc()) {
               std::string_view cmd_string =
                   email_helpers::smtp_command_string(session_state_cmd);
-              applog.info("{} parsed command: {} {}", sid, cmd_string, args);
+              applog.info("{} parsed command: {}", sid, cmd_string);
 
               switch (session_state_cmd) {
               case SMTP_COMMAND::HELO:
@@ -512,7 +512,6 @@ seastar::future<> handle_connection(
           }
         } else if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
                    session_state_cmd == SMTP_COMMAND::UNKNOWN) {
-          applog.warn("{} unknown command: {}", sid, buffer_view);
           sstring message = "500 Syntax error, command unrecognized\r\n";
           co_await session->commit_message(logfile, session_state_logfile_pos,
                                            std::move(message));
