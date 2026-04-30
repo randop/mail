@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Legacy cmake versions does not support suppression of some warnings
-set(FEATURE_MIN_VERSION "4.3.0")
+set(FEATURE_MIN_VERSION "4.0.0")
 
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "${FEATURE_MIN_VERSION}")
   # Suppress Boost-related CMake warnings
