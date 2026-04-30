@@ -85,3 +85,6 @@ private.key
 
 # smtp logs
 smtp*.log
+
+# data directory
+data/
