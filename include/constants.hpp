@@ -84,3 +84,5 @@ enum class SMTP_SESSION_STATUS : uint8_t {
   ERROR,
   PROXY
 };
+
+enum class resource_budget_t : uint8_t { AUTOMATIC, ECONOMY };

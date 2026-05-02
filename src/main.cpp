@@ -615,7 +615,8 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       seastar::lw_shared_ptr<email_domains_t> all_email_domains,
       const seastar::sstring email_domain, const seastar::sstring datadirectory,
       seastar::lw_shared_ptr<bool> proxy_support,
-      seastar::lw_shared_ptr<sstring> logdirectory) {
+      seastar::lw_shared_ptr<sstring> logdirectory,
+      seastar::lw_shared_ptr<resource_budget_t> budget) {
 
   applog.trace("Loading X.509 certificates {}, {} ...", certificate,
                privatekey);
@@ -648,8 +649,12 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
     ss.abort_accept();
   });
 
-  // TODO: Load concurrent connection limit from configuration
-  seastar::semaphore connect_semaphore(24);
+  // TODO: Detect system resource capabilities for optimal configuration
+  size_t connection_limit = 1024;
+  if (*budget == resource_budget_t::ECONOMY) {
+    connection_limit = 24;
+  }
+  seastar::semaphore connect_semaphore(connection_limit);
 
   while (!as.abort_requested()) {
     try {
@@ -725,12 +730,6 @@ int main(int argc, char **argv) {
     argv_clone.push_back(s.data());
   }
 
-  // TODO: Load performance tuning from configuration
-  seastar::app_template::seastar_options opts;
-  opts.smp_opts.memory.set_value("64M");
-
-  seastar::app_template app(std::move(opts));
-
   uint16_t port = 2525;
   uint16_t default_timeout_seconds = 120;
 
@@ -759,6 +758,16 @@ int main(int argc, char **argv) {
     ("proxy-support",
       po::bool_switch()->default_value(false),
       "Read real client IP using PROXY protocol v2")
+    ("budget",
+     po::value<seastar::sstring>()->required()->default_value("auto")->notifier([](const std::string& m) {
+                if (m != "auto" && m != "eco") {
+                    throw po::validation_error(po::validation_error::invalid_option_value,
+                                               "budget", m);
+                }
+            }),
+     "Resource budget: [auto | eco]"
+     "\nauto - Automatically adapt resource allocation using optimal system configuration."
+     "\neco - Use minimal resources for low-tier systems.")
     ("version",
       po::bool_switch()->default_value(false),
       "Show version and exit");
@@ -780,7 +789,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  // TODO: Load domain configuration
+  seastar::app_template::seastar_options opts;
+  if (povm["budget"].as<sstring>() == "eco") {
+    opts.smp_opts.memory.set_value("64M");
+  }
+
+  seastar::app_template app(std::move(opts));
+
   sstring domain = "localhost.localdomain";
   sstring email_domain = "localhost.localdomain";
   std::string datadirectory = "/var/spool/smtp";
@@ -1002,16 +1017,24 @@ int main(int argc, char **argv) {
         seastar::lw_shared_ptr<sstring> logdirectory =
             seastar::make_lw_shared<sstring>(std::move(log_directory));
 
+        resource_budget_t budget = resource_budget_t::AUTOMATIC;
+        sstring budget_option = cfg["budget"].as<sstring>();
+        if (budget_option == "eco") {
+          budget = resource_budget_t::ECONOMY;
+        }
+        seastar::lw_shared_ptr<resource_budget_t> resource_budget =
+            seastar::make_lw_shared<resource_budget_t>(budget);
+
         auto shards_future = seastar::smp::invoke_on_all(
             [port, &abort_sources, &gate, timeout_seconds,
              email_size_limit = email_size_limit, domain = sstring(domain),
              datadirectory, logdirectory, certificate, privatekey, email_domain,
-             all_email_domains, proxy_support] {
+             all_email_domains, proxy_support, resource_budget] {
               return serve(port, abort_sources.local(), gate.local(),
                            timeout_seconds, email_size_limit, domain,
                            certificate, privatekey, all_email_domains,
                            email_domain, datadirectory, proxy_support,
-                           logdirectory);
+                           logdirectory, resource_budget);
             });
 
         applog.info("server listening on 0.0.0.0 port {}", port);
