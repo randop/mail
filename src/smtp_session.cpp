@@ -106,9 +106,11 @@ future<> smtp_session::close() {
 
   if (emailfile) {
     co_await emailfile->close();
+    emailfile.reset();
   }
   if (logfile) {
     co_await logfile->close();
+    logfile.reset();
   }
 
   (void)out.release();

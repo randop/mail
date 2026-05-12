@@ -644,10 +644,14 @@ int main(int argc, char **argv) {
   }
 
   seastar::app_template::seastar_options opts;
-  if (povm["budget"].as<sstring>() == "eco") {
+  if (!show_help && povm["budget"].as<sstring>() == "eco") {
     opts.smp_opts.memory.set_value("64M");
   }
 
+  /**
+   * TODO: option to change reactor backend
+  opts.reactor_opts.reactor_backend.select_candidate("epoll");
+  **/
   seastar::app_template app(std::move(opts));
 
   sstring domain = "localhost.localdomain";
