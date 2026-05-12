@@ -73,8 +73,12 @@ public:
 
 private:
   connected_socket cs;
-  std::unique_ptr<input_stream<char>> in;
-  std::unique_ptr<output_stream<char>> out;
+
+  std::unique_ptr<seastar::input_stream<char>> in;
+  std::unique_ptr<seastar::output_stream<char>> out;
+  std::unique_ptr<seastar::input_stream<char>> plain_in;
+  std::unique_ptr<seastar::output_stream<char>> plain_out;
+
   std::optional<dma_file_writer> emailfile;
   uint64_t state_emailfile_pos = 0;
   std::optional<dma_file_writer> logfile;

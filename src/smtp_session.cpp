@@ -1,9 +1,11 @@
 #include "smtp_session.hpp"
 
-smtp_session::smtp_session(connected_socket cs_obj)
-    : cs(std::move(cs_obj)),
-      in(std::make_unique<input_stream<char>>(this->cs.input())),
-      out(std::make_unique<output_stream<char>>(this->cs.output())) {}
+smtp_session::smtp_session(connected_socket cs_obj) : cs(std::move(cs_obj)) {
+  in = std::make_unique<seastar::input_stream<char>>(cs.input());
+  out = std::make_unique<seastar::output_stream<char>>(cs.output());
+  plain_in = {};
+  plain_out = {};
+}
 
 future<> smtp_session::init_logfile(const sstring &filename) {
   if (logfile.has_value()) {
@@ -35,22 +37,24 @@ smtp_session::read_input_exactly(const size_t &length) {
 }
 
 future<> smtp_session::upgrade_tls(shared_ptr<tls::server_credentials> certs) {
-  if (out) {
-    co_await out->flush();
-    (void)out.release();
-    out.reset();
-  }
+  /*** IMPORTANT: Workarounds to cleanup and prevent socket leaks ***/
+  co_await out->flush();
 
-  if (in) {
-    (void)in.release();
-    in.reset();
-  }
+  plain_in = std::move(in);
+  plain_out = std::move(out);
 
+  (void)out.release();
+  co_await seastar::yield();
+
+  (void)in.release();
   cs = co_await tls::wrap_server(certs, std::move(cs));
 
-  out = std::make_unique<output_stream<char>>(cs.output());
-  in = std::make_unique<input_stream<char>>(cs.input());
+  in = std::make_unique<seastar::input_stream<char>>(cs.input());
+  out = std::make_unique<seastar::output_stream<char>>(cs.output());
+
   is_tls = true;
+
+  co_return;
 }
 
 future<> smtp_session::write_data(temporary_buffer<char> data) {
@@ -116,6 +120,19 @@ future<> smtp_session::close() {
 
   out.reset();
   in.reset();
+
+  if (plain_out) {
+    co_await plain_out->close();
+    plain_out.reset();
+  }
+
+  if (plain_in) {
+    co_await plain_in->close();
+    plain_in.reset();
+  }
 }
 
-smtp_session::~smtp_session() { applog.info("SESSION DESTROY"); }
+smtp_session::~smtp_session() {
+  // TODO: conditional debug on compile time
+  applog.trace("smtp_session destructor...");
+}

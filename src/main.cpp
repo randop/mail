@@ -90,15 +90,16 @@ using namespace seastar;
 using namespace string_helpers;
 using namespace file_helpers;
 
-seastar::future<> handle_connection(
-    seastar::connected_socket cs, seastar::socket_address remote,
-    uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
-    shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
-    const seastar::sstring domain,
-    seastar::lw_shared_ptr<email_domains_t> all_email_domains,
-    const seastar::sstring email_domain, const seastar::sstring datadirectory,
-    seastar::lw_shared_ptr<bool> proxy_support,
-    seastar::lw_shared_ptr<sstring> logdirectory) {
+seastar::future<>
+handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
+                  uint32_t timeout_seconds, seastar::abort_source &as,
+                  shared_ptr<tls::server_credentials> certs,
+                  const size_t email_size_limit, const seastar::sstring domain,
+                  seastar::lw_shared_ptr<email_domains_t> all_email_domains,
+                  const seastar::sstring email_domain,
+                  const seastar::sstring datadirectory,
+                  seastar::lw_shared_ptr<bool> proxy_support,
+                  seastar::lw_shared_ptr<sstring> logdirectory) {
 
   sstring sid_uuid = uuid_helpers::generate_v7();
   std::string_view sid_view(sid_uuid.data(), sid_uuid.size());
@@ -121,8 +122,6 @@ seastar::future<> handle_connection(
   bool active = true;
   bool session_state_transaction_ok = false;
   bool session_state_data_written = false;
-
-  gate.enter();
 
   auto sub = as.subscribe([&]() noexcept {
     active = false;
@@ -452,10 +451,8 @@ seastar::future<> handle_connection(
     }
   }
 
-  (void)session.release();
   session.reset();
 
-  gate.leave();
   applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
 
   co_return;
@@ -513,21 +510,34 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
   while (!as.abort_requested()) {
     try {
       co_await connect_semaphore.wait();
+
       auto ar = co_await ss.accept();
       auto addr = ar.remote_address;
+
       connection_count++;
-      (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
-                              gate, as, certs, email_size_limit, domain,
-                              all_email_domains, email_domain, datadirectory,
-                              proxy_support, logdirectory)
-          .handle_exception([=](std::exception_ptr ep) {
+
+      (void)seastar::with_gate(
+          gate,
+          [conn = std::move(ar.connection), addr, &as, timeout_seconds, certs,
+           email_size_limit, domain, all_email_domains, email_domain,
+           datadirectory, proxy_support,
+           logdirectory]() mutable -> seastar::future<> {
             try {
-              std::rethrow_exception(ep);
+              co_await handle_connection(
+                  std::move(conn), addr, timeout_seconds, as, certs,
+                  email_size_limit, domain, all_email_domains, email_domain,
+                  datadirectory, proxy_support, logdirectory);
+            } catch (std::exception_ptr ep) {
+              try {
+                std::rethrow_exception(ep);
+              } catch (const std::exception &ex) {
+                applog.error("Error closing connection: {}", ex.what());
+              }
             } catch (const std::exception &ex) {
-              applog.error("Error closing connections: {}", ex.what());
+              applog.error("Error closing connection: {}", ex.what());
             }
           })
-          .finally([&gate, &connection_count, &connect_semaphore] mutable {
+          .finally([&connect_semaphore, &connection_count] mutable {
             connect_semaphore.signal();
             connection_count--;
             applog.trace("finally closing connections...");
@@ -536,7 +546,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       break;
     } catch (const std::exception &ex) {
       if (!as.abort_requested()) {
-        applog.error("connection accept failed: {}", ex.what());
+        applog.error("accept failed: {}", ex.what());
       }
     }
   }
