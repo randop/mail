@@ -76,6 +76,8 @@ this software will be made available under the specified Change License.
 #include "email_helpers.hpp"
 #include "file_helpers.hpp"
 #include "ip_helpers.hpp"
+#include "logger.hpp"
+#include "smtp_session.hpp"
 #include "stop_signal.hh"
 #include "string_helpers.hpp"
 #include "uuid_helpers.hpp"
@@ -88,83 +90,16 @@ using namespace seastar;
 using namespace string_helpers;
 using namespace file_helpers;
 
-static seastar::logger applog("smtp-server");
-
-struct smtp_session {
-  connected_socket cs;
-  std::unique_ptr<output_stream<char>> out;
-  input_stream<char> in;
-  bool is_tls = false;
-
-  smtp_session(connected_socket cs_obj)
-      : cs(std::move(cs_obj)),
-        out(std::make_unique<output_stream<char>>(this->cs.output())),
-        in(this->cs.input()) {}
-
-  future<> upgrade_tls(shared_ptr<tls::server_credentials> certs) {
-    if (out) {
-      co_await out->flush();
-      /*** IMPORTANT: out.release() to avoid TLS upgrade issues ***/
-      (void)out.release();
-    }
-    in = {};
-    cs = co_await tls::wrap_server(certs, std::move(cs));
-    out = std::make_unique<output_stream<char>>(cs.output());
-    in = cs.input();
-    is_tls = true;
-  }
-
-  future<> commit_message(seastar::lw_shared_ptr<dma_file_writer> logwriter,
-                          uint64_t &session_state_logfile_pos,
-                          seastar::sstring message) {
-    if (message.empty()) {
-      co_return;
-    }
-
-    session_state_logfile_pos += message.size();
-
-    try {
-      co_await logwriter->write(message.data(), message.size());
-    } catch (const std::exception_ptr &ep) {
-      try {
-        std::rethrow_exception(ep);
-      } catch (const std::system_error &e) {
-        applog.error("commit log system error (errno {}): {} - what(): {}",
-                     e.code().value(), e.code().message(), e.what());
-      } catch (const std::exception &e) {
-        applog.error("commit log exception caught: what() = {}", e.what());
-      } catch (...) {
-        applog.error("unknown exception while committing log");
-      }
-    } catch (const std::exception &ex) {
-      applog.error("log commit error: {}", ex.what());
-    }
-
-    co_await out->write(message);
-    co_await out->flush();
-
-    co_return;
-  }
-
-  future<> close() {
-    cs.shutdown_output();
-    cs.shutdown_input();
-    if (out) {
-      co_await out->close();
-      out = nullptr;
-    }
-  }
-};
-
-seastar::future<> handle_connection(
-    seastar::connected_socket cs, seastar::socket_address remote,
-    uint32_t timeout_seconds, seastar::gate &gate, seastar::abort_source &as,
-    shared_ptr<tls::server_credentials> certs, const size_t email_size_limit,
-    const seastar::sstring domain,
-    seastar::lw_shared_ptr<email_domains_t> all_email_domains,
-    const seastar::sstring email_domain, const seastar::sstring datadirectory,
-    seastar::lw_shared_ptr<bool> proxy_support,
-    seastar::lw_shared_ptr<sstring> logdirectory) {
+seastar::future<>
+handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
+                  uint32_t timeout_seconds, seastar::abort_source &as,
+                  shared_ptr<tls::server_credentials> certs,
+                  const size_t email_size_limit, const seastar::sstring domain,
+                  seastar::lw_shared_ptr<email_domains_t> all_email_domains,
+                  const seastar::sstring email_domain,
+                  const seastar::sstring datadirectory,
+                  seastar::lw_shared_ptr<bool> proxy_support,
+                  seastar::lw_shared_ptr<sstring> logdirectory) {
 
   sstring sid_uuid = uuid_helpers::generate_v7();
   std::string_view sid_view(sid_uuid.data(), sid_uuid.size());
@@ -179,86 +114,52 @@ seastar::future<> handle_connection(
   applog.info("{} new client {} connection, session logging on: {}", sid,
               remote, log_filename);
 
-  std::unique_ptr<smtp_session> session;
+  std::unique_ptr<smtp_session> session =
+      std::make_unique<smtp_session>(std::move(cs));
 
   seastar::timer<> idle_timer;
 
   bool active = true;
   bool session_state_transaction_ok = false;
-  uint64_t session_state_emailfile_pos = 0;
-  uint64_t session_state_logfile_pos = 0;
   bool session_state_data_written = false;
 
-  gate.enter();
+  auto sub = as.subscribe([&]() noexcept {
+    active = false;
+    idle_timer.cancel();
+    applog.warn("{} aborting client {} ...", sid, ip);
+  });
 
-  std::optional<seastar::file> log_dma_file;
-  std::optional<seastar::file> emailfile;
-  std::optional<dma_file_writer> email_writer;
-  std::optional<dma_file_writer> log_writer;
-  std::optional<seastar::lw_shared_ptr<dma_file_writer>> log_dma_file_writer;
+  idle_timer.set_callback([&, ip] {
+    active = false;
+    applog.warn("{} client {} timeout, closing ...", sid, ip);
+  });
+  idle_timer.arm(std::chrono::seconds(timeout_seconds));
+
+  constexpr size_t fixed_stream_capacity = 16;
+  std::vector<char> fixed_stream(fixed_stream_capacity, '\0');
+  size_t fixed_stream_size = 0;
+  size_t session_state_command_index = 0;
+
+  SMTP_COMMAND session_state_cmd{SMTP_COMMAND::UNKNOWN};
+
+  SMTP_SESSION_STATUS session_state_status{SMTP_SESSION_STATUS::COMMAND};
+
+  size_t session_state_rcpt_count = 0;
+  size_t session_state_mailfrom_count = 0;
+
+  bool session_state_proxy_header_read = false;
 
   try {
-    log_dma_file.emplace(co_await open_file_dma(
-        log_filename, open_flags::rw | open_flags::create));
+    co_await session->init_logfile(log_filename);
 
-    emailfile.emplace(co_await seastar::open_file_dma(
-        email_filename, seastar::open_flags::rw | seastar::open_flags::create));
-
-    email_writer.emplace(std::move(emailfile.value()));
-    log_writer.emplace(std::move(log_dma_file.value()));
-    log_dma_file_writer.emplace(seastar::make_lw_shared<dma_file_writer>(
-        std::move(log_writer.value())));
-
-    seastar::lw_shared_ptr<dma_file_writer> logfile =
-        log_dma_file_writer.value();
-
-    session = std::make_unique<smtp_session>(std::move(cs));
-
-    auto sub = as.subscribe([&]() noexcept {
-      active = false;
-      idle_timer.cancel();
-      applog.warn("{} aborting client {} ...", sid, ip);
-      try {
-        session->cs.shutdown_input();
-        session->cs.shutdown_output();
-      } catch (...) {
-        // void
-      }
-    });
-
-    idle_timer.set_callback([&, ip] {
-      active = false;
-      applog.warn("{} client {} timeout, closing ...", sid, ip);
-      try {
-        session->cs.shutdown_input();
-        session->cs.shutdown_output();
-      } catch (...) {
-        // void
-      }
-    });
-    idle_timer.arm(std::chrono::seconds(timeout_seconds));
-
-    constexpr size_t fixed_stream_capacity = 16;
-    std::vector<char> fixed_stream(fixed_stream_capacity, '\0');
-    size_t fixed_stream_size = 0;
-
-    size_t session_state_command_index = 0;
-    SMTP_COMMAND session_state_cmd{SMTP_COMMAND::UNKNOWN};
-
-    SMTP_SESSION_STATUS session_state_status{SMTP_SESSION_STATUS::COMMAND};
-
-    size_t session_state_rcpt_count = 0;
-    size_t session_state_mailfrom_count = 0;
-
-    bool session_state_proxy_header_read = false;
     if (*proxy_support) {
       session_state_proxy_header_read = true;
       if (session_state_proxy_header_read) {
         session_state_proxy_header_read = false;
-        const auto header = co_await session->in.read_exactly(16);
+        const auto header = co_await session->read_input_exactly(16);
         const auto *h = header.get();
         uint16_t header_length = (h[14] << 8) | h[15];
-        auto body = co_await session->in.read_exactly(header_length);
+        auto body = co_await session->read_input_exactly(header_length);
         auto proxy_info =
             ip_helpers::parse_proxy_v2(header.get(), body.get(), header_length);
         if (!proxy_info) [[unlikely]] {
@@ -270,19 +171,17 @@ seastar::future<> handle_connection(
 
           sstring ready =
               std::format("220 {} Service ready\r\n", domain.data());
-          co_await session->commit_message(logfile, session_state_logfile_pos,
-                                           std::move(ready));
+          co_await session->send(std::move(ready));
         }
       }
     } else {
       sstring ready = std::format("220 {} Service ready\r\n", domain.data());
-      co_await session->commit_message(logfile, session_state_logfile_pos,
-                                       std::move(ready));
+      co_await session->send(std::move(ready));
     }
 
     while (active) {
       seastar::temporary_buffer<char> buffer_stream =
-          co_await session->in.read();
+          co_await session->read_input();
       if (buffer_stream.empty()) {
         break;
       }
@@ -334,8 +233,7 @@ seastar::future<> handle_connection(
       }
 
       if (session_state_status == SMTP_SESSION_STATUS::DATA) {
-        session_state_emailfile_pos += email_stream.size();
-        co_await email_writer->write(email_stream.get(), email_stream.size());
+        co_await session->write_data(email_stream.share());
         session_state_data_written = true;
 
         std::string_view fixed_view(fixed_stream.data(), fixed_stream_capacity);
@@ -345,23 +243,20 @@ seastar::future<> handle_connection(
           session_state_status = SMTP_SESSION_STATUS::COMMAND;
           session_state_transaction_ok = true;
           sstring message = "250 OK: message queued\r\n";
-          co_await session->commit_message(logfile, session_state_logfile_pos,
-                                           std::move(message));
+          co_await session->send(std::move(message));
         } else {
-          if (session_state_emailfile_pos > DEFAULT_EMAIL_SIZE_LIMIT) {
+          if (session->get_email_size() > DEFAULT_EMAIL_SIZE_LIMIT) {
             session_state_transaction_ok = false;
 
             sstring message = "552 5.3.4 Message size limit exceeded\r\n";
-            co_await session->commit_message(logfile, session_state_logfile_pos,
-                                             std::move(message));
+            co_await session->send(std::move(message));
             applog.error("{} client {} exceeded message size limit", sid, ip);
             active = false;
             break;
           }
         }
       } else {
-        co_await logfile->write(buffer_stream.get(), buffer_stream.size());
-        session_state_logfile_pos += buffer_stream.size();
+        co_await session->write_log(buffer_stream.share());
 
         if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
             session_state_cmd != SMTP_COMMAND::UNKNOWN) {
@@ -387,14 +282,12 @@ seastar::future<> handle_connection(
                                 "[{}]\r\n250-8BITMIME\r\n250-SMTPUTF8\r\n250-"
                                 "STARTTLS\r\n250 SIZE {}\r\n",
                                 domain_sv, ip, email_size_limit);
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 break;
               }
               case SMTP_COMMAND::STARTTLS: {
                 sstring message = "220 Ready to start TLS\r\n";
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 co_await session->upgrade_tls(certs);
                 applog.info("{} session of {} upgraded to TLS", sid, ip);
                 break;
@@ -405,12 +298,10 @@ seastar::future<> handle_connection(
                 if (ec == std::errc()) {
                   session_state_mailfrom_count++;
                   sstring message = "250 Accepted\r\n";
-                  co_await session->commit_message(
-                      logfile, session_state_logfile_pos, std::move(message));
+                  co_await session->send(std::move(message));
                 } else {
                   sstring message = "501 5.1.3 Bad email address syntax\r\n";
-                  co_await session->commit_message(
-                      logfile, session_state_logfile_pos, std::move(message));
+                  co_await session->send(std::move(message));
                 }
 
                 break;
@@ -419,8 +310,7 @@ seastar::future<> handle_connection(
                 auto [email, ec] = email_helpers::extract_email_address(args);
                 if (ec == std::errc()) {
                   sstring message = "250 Accepted\r\n";
-                  co_await session->commit_message(
-                      logfile, session_state_logfile_pos, std::move(message));
+                  co_await session->send(std::move(message));
                   std::string_view check_email =
                       email_helpers::get_domain(email);
                   if (all_email_domains->count == 1 &&
@@ -437,8 +327,7 @@ seastar::future<> handle_connection(
                   }
                 } else {
                   sstring message = "553 5.1.3 Bad email address syntax\r\n";
-                  co_await session->commit_message(
-                      logfile, session_state_logfile_pos, std::move(message));
+                  co_await session->send(std::move(message));
                 }
 
                 break;
@@ -447,21 +336,18 @@ seastar::future<> handle_connection(
                 if (session_state_rcpt_count >= 1 &&
                     session_state_mailfrom_count >= 1) {
                   session_state_status = SMTP_SESSION_STATUS::DATA;
+                  co_await session->init_emailfile(email_filename);
                   sstring message =
                       "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
-                  co_await session->commit_message(
-                      logfile, session_state_logfile_pos, std::move(message));
+                  co_await session->send(std::move(message));
                 } else {
                   if (session_state_rcpt_count == 0) {
                     sstring message = "554 No valid recipients\r\n";
-                    co_await session->commit_message(
-                        logfile, session_state_logfile_pos, std::move(message));
+                    co_await session->send(std::move(message));
                   } else {
                     sstring message = "503 Bad sequence of commands\r\n";
-                    co_await session->commit_message(
-                        logfile, session_state_logfile_pos, std::move(message));
+                    co_await session->send(std::move(message));
                   }
-                  co_await session->out->flush();
                 }
                 break;
               }
@@ -469,14 +355,12 @@ seastar::future<> handle_connection(
                 session_state_rcpt_count = 0;
                 session_state_mailfrom_count = 0;
                 sstring message = "250 OK\r\n";
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 break;
               }
               case SMTP_COMMAND::NOOP: {
                 sstring message = "250 OK\r\n";
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 break;
               }
               case SMTP_COMMAND::BDAT:
@@ -485,22 +369,19 @@ seastar::future<> handle_connection(
               case SMTP_COMMAND::SOML:
               case SMTP_COMMAND::AUTH: {
                 sstring message = "502 Command not implemented\r\n";
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 break;
               }
               case SMTP_COMMAND::QUIT: {
                 sstring message = "221 Bye\r\n";
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 active = false;
                 break;
               }
               case SMTP_COMMAND::UNKNOWN:
               default:
                 sstring message = "500 Syntax error\r\n";
-                co_await session->commit_message(
-                    logfile, session_state_logfile_pos, std::move(message));
+                co_await session->send(std::move(message));
                 break;
               }
 
@@ -513,16 +394,13 @@ seastar::future<> handle_connection(
         } else if (session_state_status == SMTP_SESSION_STATUS::COMMAND &&
                    session_state_cmd == SMTP_COMMAND::UNKNOWN) {
           sstring message = "500 Syntax error, command unrecognized\r\n";
-          co_await session->commit_message(logfile, session_state_logfile_pos,
-                                           std::move(message));
+          co_await session->send(std::move(message));
         }
 
-        if (session_state_logfile_pos > SMTP_COMMAND_BUFFER_SIZE_LIMIT) {
-
+        if (session->get_log_size() > SMTP_COMMAND_BUFFER_SIZE_LIMIT) {
           applog.error("{} client {} exceeded command buffer limit", sid, ip);
           sstring message = "552 5.3.4 Message size limit exceeded\r\n";
-          co_await session->commit_message(logfile, session_state_logfile_pos,
-                                           std::move(message));
+          co_await session->send(std::move(message));
         }
       }
     }
@@ -544,46 +422,19 @@ seastar::future<> handle_connection(
     applog.warn("{} connection {} error: {}", sid, ip, ex.what());
   }
 
-  try {
-    // flush and commit DMA files
-    co_await seastar::when_all_succeed(log_dma_file_writer.value()->close(),
-                                       email_writer.value().close());
-
-    if (session_state_transaction_ok) {
-      applog.info("{} written client {} session logs on {}", sid, ip,
-                  log_filename);
-    } else {
-      applog.warn("{} email transaction failure, see logs on {} on client {}",
-                  sid, log_filename, ip);
-    }
-
-    if (session_state_data_written) {
-      applog.info("{} new mail received on {}", sid, email_filename);
-    }
-  } catch (const std::exception_ptr &ep) {
-    try {
-      std::rethrow_exception(ep);
-    } catch (const std::system_error &e) {
-      applog.error("{} system error (errno {}): {} - what(): {}", sid,
-                   e.code().value(), e.code().message(), e.what());
-    } catch (const std::exception &e) {
-      applog.error("{} exception caught: what() = {}", sid, e.what());
-    } catch (...) {
-      applog.error("{} unknown exception on file operations", sid);
-    }
-  } catch (const std::exception &ex) {
-    applog.warn("{} file operations {} error: {}", sid, ip, ex.what());
+  if (session_state_transaction_ok) {
+    applog.info("{} written client {} session logs on {}", sid, ip,
+                log_filename);
+  } else {
+    applog.warn("{} email transaction failure, see logs on {} on client {}",
+                sid, log_filename, ip);
   }
 
+  if (session_state_data_written) {
+    applog.info("{} new mail received on {}", sid, email_filename);
+  }
   idle_timer.cancel();
 
-  try {
-    session->cs.shutdown_input();
-    session->cs.shutdown_output();
-    co_await session->in.close();
-  } catch (...) {
-    // void
-  }
   try {
     co_await session->close();
   } catch (...) {
@@ -600,9 +451,9 @@ seastar::future<> handle_connection(
     }
   }
 
-  applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
+  session.reset();
 
-  gate.leave();
+  applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
 
   co_return;
 }
@@ -658,24 +509,35 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
 
   while (!as.abort_requested()) {
     try {
-      auto ar = co_await ss.accept();
-
       co_await connect_semaphore.wait();
 
+      auto ar = co_await ss.accept();
       auto addr = ar.remote_address;
+
       connection_count++;
-      (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,
-                              gate, as, certs, email_size_limit, domain,
-                              all_email_domains, email_domain, datadirectory,
-                              proxy_support, logdirectory)
-          .handle_exception([=](std::exception_ptr ep) {
+
+      (void)seastar::with_gate(
+          gate,
+          [conn = std::move(ar.connection), addr, &as, timeout_seconds, certs,
+           email_size_limit, domain, all_email_domains, email_domain,
+           datadirectory, proxy_support,
+           logdirectory]() mutable -> seastar::future<> {
             try {
-              std::rethrow_exception(ep);
+              co_await handle_connection(
+                  std::move(conn), addr, timeout_seconds, as, certs,
+                  email_size_limit, domain, all_email_domains, email_domain,
+                  datadirectory, proxy_support, logdirectory);
+            } catch (std::exception_ptr ep) {
+              try {
+                std::rethrow_exception(ep);
+              } catch (const std::exception &ex) {
+                applog.error("Error closing connection: {}", ex.what());
+              }
             } catch (const std::exception &ex) {
-              applog.error("Error closing connections: {}", ex.what());
+              applog.error("Error closing connection: {}", ex.what());
             }
           })
-          .finally([&gate, &connection_count, &connect_semaphore] {
+          .finally([&connect_semaphore, &connection_count] mutable {
             connect_semaphore.signal();
             connection_count--;
             applog.trace("finally closing connections...");
@@ -684,7 +546,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
       break;
     } catch (const std::exception &ex) {
       if (!as.abort_requested()) {
-        applog.error("connection accept failed: {}", ex.what());
+        applog.error("accept failed: {}", ex.what());
       }
     }
   }
@@ -790,10 +652,14 @@ int main(int argc, char **argv) {
   }
 
   seastar::app_template::seastar_options opts;
-  if (povm["budget"].as<sstring>() == "eco") {
+  if (!show_help && povm["budget"].as<sstring>() == "eco") {
     opts.smp_opts.memory.set_value("64M");
   }
 
+  /**
+   * TODO: option to change reactor backend
+  opts.reactor_opts.reactor_backend.select_candidate("epoll");
+  **/
   seastar::app_template app(std::move(opts));
 
   sstring domain = "localhost.localdomain";

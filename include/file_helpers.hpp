@@ -5,7 +5,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <seastar/core/sstring.hh>
+#include <seastar/net/api.hh>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>

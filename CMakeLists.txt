@@ -59,6 +59,8 @@ find_package(OpenSSL REQUIRED)
 add_executable(smtp-server 
   src/main.cpp
   src/dma_file_writer.cpp
+  src/smtp_session.cpp
+  src/logger.cpp
   src/email_helpers.cpp
   src/file_helpers.cpp
   src/ip_helpers.cpp
