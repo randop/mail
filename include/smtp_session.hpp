@@ -69,6 +69,8 @@ public:
 
   future<> close();
 
+  ~smtp_session();
+
 private:
   connected_socket cs;
   std::unique_ptr<input_stream<char>> in;

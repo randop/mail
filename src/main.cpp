@@ -452,11 +452,11 @@ seastar::future<> handle_connection(
     }
   }
 
-  applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
-
   (void)session.release();
+  session.reset();
 
   gate.leave();
+  applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
 
   co_return;
 }
@@ -512,10 +512,8 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
 
   while (!as.abort_requested()) {
     try {
-      auto ar = co_await ss.accept();
-
       co_await connect_semaphore.wait();
-
+      auto ar = co_await ss.accept();
       auto addr = ar.remote_address;
       connection_count++;
       (void)handle_connection(std::move(ar.connection), addr, timeout_seconds,

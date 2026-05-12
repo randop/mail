@@ -37,12 +37,13 @@ smtp_session::read_input_exactly(const size_t &length) {
 future<> smtp_session::upgrade_tls(shared_ptr<tls::server_credentials> certs) {
   if (out) {
     co_await out->flush();
-    /*** IMPORTANT: out.release() to avoid TLS upgrade issues ***/
     (void)out.release();
+    out.reset();
   }
 
   if (in) {
     (void)in.release();
+    in.reset();
   }
 
   cs = co_await tls::wrap_server(certs, std::move(cs));
@@ -113,8 +114,8 @@ future<> smtp_session::close() {
     logfile.reset();
   }
 
-  (void)out.release();
-  (void)in.release();
-  out = nullptr;
-  in = nullptr;
+  out.reset();
+  in.reset();
 }
+
+smtp_session::~smtp_session() { applog.info("SESSION DESTROY"); }
