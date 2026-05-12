@@ -454,6 +454,8 @@ seastar::future<> handle_connection(
 
   applog.info("{} client [{}] {} connection finished.", sid, ip, remote);
 
+  (void)session.release();
+
   gate.leave();
 
   co_return;
@@ -527,7 +529,7 @@ serve(uint16_t port, seastar::abort_source &as, seastar::gate &gate,
               applog.error("Error closing connections: {}", ex.what());
             }
           })
-          .finally([&gate, &connection_count, &connect_semaphore] {
+          .finally([&gate, &connection_count, &connect_semaphore] mutable {
             connect_semaphore.signal();
             connection_count--;
             applog.trace("finally closing connections...");

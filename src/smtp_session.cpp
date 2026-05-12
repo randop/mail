@@ -1,7 +1,9 @@
 #include "smtp_session.hpp"
 
 smtp_session::smtp_session(connected_socket cs_obj)
-    : cs(std::move(cs_obj)), in(cs.input()), out(cs.output()) {}
+    : cs(std::move(cs_obj)),
+      in(std::make_unique<input_stream<char>>(this->cs.input())),
+      out(std::make_unique<output_stream<char>>(this->cs.output())) {}
 
 future<> smtp_session::init_logfile(const sstring &filename) {
   if (logfile.has_value()) {
@@ -24,28 +26,30 @@ future<> smtp_session::init_emailfile(const sstring &filename) {
 }
 
 future<temporary_buffer<char>> smtp_session::read_input() {
-  co_return co_await in.read();
+  co_return co_await in->read();
 }
-future<temporary_buffer<char>> smtp_session::read_input_exactly(size_t length) {
-  co_return co_await in.read_exactly(length);
+
+future<temporary_buffer<char>>
+smtp_session::read_input_exactly(const size_t &length) {
+  co_return co_await in->read_exactly(length);
 }
 
 future<> smtp_session::upgrade_tls(shared_ptr<tls::server_credentials> certs) {
-  co_await out.flush();
+  if (out) {
+    co_await out->flush();
+    /*** IMPORTANT: out.release() to avoid TLS upgrade issues ***/
+    (void)out.release();
+  }
 
-  input_stream<char> plain_in = std::move(in);
-  output_stream<char> plain_out = std::move(out);
+  if (in) {
+    (void)in.release();
+  }
 
   cs = co_await tls::wrap_server(certs, std::move(cs));
-  out = cs.output();
-  in = cs.input();
+
+  out = std::make_unique<output_stream<char>>(cs.output());
+  in = std::make_unique<input_stream<char>>(cs.input());
   is_tls = true;
-  try {
-    // co_await plain_out.close();
-    // co_await plain_in.close();
-  } catch (...) {
-    // void
-  }
 }
 
 future<> smtp_session::write_data(temporary_buffer<char> data) {
@@ -82,21 +86,22 @@ future<> smtp_session::send(sstring message) {
     applog.error("log commit error: {}", ex.what());
   }
 
-  co_await out.write(message);
-  co_await out.flush();
+  co_await out->write(message);
+  co_await out->flush();
 
   co_return;
 }
 
-uint64_t smtp_session::get_email_size() { return state_emailfile_pos; }
+const uint64_t &smtp_session::get_email_size() const {
+  return state_emailfile_pos;
+}
 
-uint64_t smtp_session::get_log_size() { return state_logfile_pos; }
+const uint64_t &smtp_session::get_log_size() const { return state_logfile_pos; }
 
 future<> smtp_session::close() {
-  co_await out.flush();
-  co_await out.close();
+  co_await out->close();
+  co_await in->close();
   cs.shutdown_output();
-  co_await in.close();
   cs.shutdown_input();
 
   if (emailfile) {
@@ -105,4 +110,9 @@ future<> smtp_session::close() {
   if (logfile) {
     co_await logfile->close();
   }
+
+  (void)out.release();
+  (void)in.release();
+  out = nullptr;
+  in = nullptr;
 }

@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "dma_file_writer.hpp"
+#include "file_helpers.hpp"
 #include "logger.hpp"
 
 using namespace seastar;
@@ -54,7 +55,7 @@ public:
   future<> init_emailfile(const sstring &filename);
 
   future<temporary_buffer<char>> read_input();
-  future<temporary_buffer<char>> read_input_exactly(size_t length);
+  future<temporary_buffer<char>> read_input_exactly(const size_t &length);
 
   future<> write_data(temporary_buffer<char> data);
   future<> write_log(temporary_buffer<char> data);
@@ -63,15 +64,15 @@ public:
 
   future<> send(sstring message);
 
-  uint64_t get_email_size();
-  uint64_t get_log_size();
+  const uint64_t &get_email_size() const;
+  const uint64_t &get_log_size() const;
 
   future<> close();
 
 private:
   connected_socket cs;
-  input_stream<char> in;
-  output_stream<char> out;
+  std::unique_ptr<input_stream<char>> in;
+  std::unique_ptr<output_stream<char>> out;
   std::optional<dma_file_writer> emailfile;
   uint64_t state_emailfile_pos = 0;
   std::optional<dma_file_writer> logfile;
