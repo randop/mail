@@ -4,17 +4,37 @@
 #include <seastar/core/sstring.hh>
 #include <string_view>
 
-static constexpr size_t DEFAULT_EMAIL_SIZE_LIMIT = 524288;     // 512KB
-static constexpr size_t SMTP_COMMAND_BUFFER_SIZE_LIMIT = 2500; // 2KB
+constexpr const size_t DEFAULT_EMAIL_SIZE_LIMIT = 524288;     // 512KB
+constexpr const size_t SMTP_COMMAND_BUFFER_SIZE_LIMIT = 2500; // 2KB
+constexpr const uint16_t DEFAULT_TIMEOUT_SECONDS = 120;
+constexpr const uint16_t DEFAULT_SMTP_PORT = 2525;
+constexpr const char DEFAULT_SMTP_HOST_RAW[] = "0.0.0.0";
+constexpr const std::string_view DEFAULT_SMTP_HOST{DEFAULT_SMTP_HOST_RAW};
+constexpr const char DEFAULT_SMTP_DOMAIN_RAW[] = "localhost.localdomain";
+constexpr const std::string_view DEFAULT_SMTP_DOMAIN{DEFAULT_SMTP_DOMAIN_RAW};
+constexpr const char DEFAULT_DATA_DIRECTORY_RAW[] = "/var/spool/smtp";
+constexpr const std::string_view DEFAULT_DATA_DIRECTORY = {
+    DEFAULT_DATA_DIRECTORY_RAW};
+constexpr const char DEFAULT_LOG_DIRECTORY_RAW[] = "/var/log/smtp";
+constexpr const std::string_view DEFAULT_LOG_DIRECTORY{
+    DEFAULT_LOG_DIRECTORY_RAW};
+constexpr const char DEFAULT_CERTIFICATE_FILE_RAW[] =
+    "/etc/ssl/private/mail/certificate.crt";
+constexpr const std::string_view DEFAULT_CERTIFICATE_FILE{
+    DEFAULT_CERTIFICATE_FILE_RAW};
+constexpr const char DEFAULT_PRIVATEKEY_FILE_RAW[] =
+    "/etc/ssl/private/mail/private.key";
+constexpr const std::string_view DEFAULT_PRIVATEKEY_FILE{
+    DEFAULT_PRIVATEKEY_FILE_RAW};
 
 constexpr const char SMTP_CRLF_RAW[] = "\r\n";
-constexpr std::string_view SMTP_CRLF{SMTP_CRLF_RAW, 2};
+constexpr const std::string_view SMTP_CRLF{SMTP_CRLF_RAW, 2};
 
 constexpr const char SMTP_DATA_END_RAW[] = "\r\n.\r\n";
-constexpr std::string_view SMTP_DATA_END{SMTP_DATA_END_RAW, 5};
+constexpr const std::string_view SMTP_DATA_END{SMTP_DATA_END_RAW, 5};
 
 constexpr const char SMTP_UNKNOWN_RAW[] = "UNKNOWN";
-constexpr std::string_view SMTP_UNKNOWN{SMTP_UNKNOWN_RAW, 7};
+constexpr const std::string_view SMTP_UNKNOWN{SMTP_UNKNOWN_RAW, 7};
 
 enum class SMTP_COMMAND : uint8_t {
   HELO,
