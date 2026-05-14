@@ -40,6 +40,7 @@
 #include <utility>
 #include <vector>
 
+#include "constants.hpp"
 #include "dma_file_writer.hpp"
 #include "file_helpers.hpp"
 #include "logger.hpp"

@@ -55,9 +55,11 @@ endif()
 
 find_package(Seastar REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(Boost REQUIRED COMPONENTS json)
 
 add_executable(smtp-server 
   src/main.cpp
+  src/smtp_configuration.cpp
   src/dma_file_writer.cpp
   src/smtp_session.cpp
   src/logger.cpp
@@ -75,6 +77,7 @@ target_link_libraries(smtp-server
     OpenSSL::SSL
     OpenSSL::Crypto
 )
+target_link_libraries(smtp-server PRIVATE Boost::json)
 
 target_include_directories(smtp-server PRIVATE
     include
