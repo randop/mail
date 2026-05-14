@@ -185,7 +185,6 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
         break;
       }
 
-      auto email_stream = buffer_stream.share();
       auto command_stream = buffer_stream.share();
 
       idle_timer.rearm(seastar::timer<>::clock::now() +
@@ -232,7 +231,8 @@ seastar::future<> handle_connection(seastar::connected_socket cs,
       }
 
       if (session_state_status == SMTP_SESSION_STATUS::DATA) {
-        co_await session->write_data(email_stream.share());
+        auto email_stream = buffer_stream.share();
+        co_await session->write_data(std::move(email_stream));
         session_state_data_written = true;
 
         std::string_view fixed_view(fixed_stream.data(), fixed_stream_capacity);

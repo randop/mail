@@ -8,6 +8,16 @@ swaks \
   --body "Test message body" \
   --no-suppress-data
 
+swaks \
+  --to recipient@online.com \
+  --from sender@online.com \
+  --server 127.0.0.1:2525 \
+  --tls \
+  --header "Subject: Test Email with TLS" \
+  --body "Test message body" \
+  --attach-type image/jpg --attach @$HOME/projects/notebook/assets/stlink-v2-01.jpg \
+  --no-suppress-data
+
 swaks --to recipient@maildomain.ngo \
   --from sender@maildomain.ngo \
   --server 127.0.0.1:5255 \

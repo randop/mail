@@ -79,7 +79,7 @@ private:
   std::unique_ptr<seastar::input_stream<char>> plain_in;
   std::unique_ptr<seastar::output_stream<char>> plain_out;
 
-  std::optional<dma_file_writer> emailfile;
+  std::optional<seastar::output_stream<char>> emailfile;
   uint64_t state_emailfile_pos = 0;
   std::optional<dma_file_writer> logfile;
   uint64_t state_logfile_pos = 0;
