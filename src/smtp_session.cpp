@@ -22,9 +22,15 @@ future<> smtp_session::init_emailfile(const sstring &filename) {
     co_return;
   }
 
+  seastar::file_output_stream_options opts;
+  opts.preallocation_size = DISABLE_BUFFER_PREALLOCATION_SIZE;
+  opts.write_behind = 1;
   seastar::file file_email =
       co_await open_file_dma(filename, open_flags::rw | open_flags::create);
-  emailfile = dma_file_writer(std::move(file_email));
+  opts.buffer_size = std::max<size_t>(file_email.disk_write_dma_alignment(),
+                                      DEFAULT_BUFFER_ALIGNMENT_SIZE);
+  emailfile =
+      co_await seastar::make_file_output_stream(std::move(file_email), opts);
 }
 
 future<temporary_buffer<char>> smtp_session::read_input() {
@@ -110,6 +116,7 @@ future<> smtp_session::close() {
   cs.shutdown_input();
 
   if (emailfile) {
+    co_await emailfile->flush();
     co_await emailfile->close();
     emailfile.reset();
   }
