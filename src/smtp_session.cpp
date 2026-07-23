@@ -68,6 +68,11 @@ future<> smtp_session::write_data(temporary_buffer<char> data) {
   co_await emailfile->write(data.get(), data.size());
 }
 
+future<> smtp_session::write_data(sstring data) {
+  state_emailfile_pos += data.size();
+  co_await emailfile->write(data.data(), data.size());
+}
+
 future<> smtp_session::write_log(temporary_buffer<char> data) {
   state_logfile_pos += data.size();
   co_await logfile->write(data.get(), data.size());

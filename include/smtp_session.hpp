@@ -59,6 +59,7 @@ public:
   future<temporary_buffer<char>> read_input_exactly(const size_t &length);
 
   future<> write_data(temporary_buffer<char> data);
+  future<> write_data(sstring data);
   future<> write_log(temporary_buffer<char> data);
 
   future<> upgrade_tls(shared_ptr<tls::server_credentials> certs);
