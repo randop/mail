@@ -339,7 +339,8 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
                     session_state_mailfrom_count >= 1) {
                   session_state_status = SMTP_SESSION_STATUS::DATA;
                   co_await session->init_emailfile(email_filename);
-                  sstring source_ip = std::format("X-Mail-Source-IP-Address: {}\r\n", ip);
+                  sstring source_ip =
+                      std::format("X-Mail-Source-IP-Address: {}\r\n", ip);
                   co_await session->write_data(std::move(source_ip));
                   sstring message =
                       "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
@@ -469,11 +470,11 @@ seastar::future<> serve(const seastar::sstring &smtp_config_json,
   opts.lba =
       seastar::server_socket::load_balancing_algorithm::connection_distribution;
 
-  auto ss =
-      seastar::listen(seastar::make_ipv4_address({smtp_config->port()}), opts);
+  seastar::ipv4_addr addr(smtp_config->host(), smtp_config->port());
+  auto ss = seastar::listen(seastar::make_ipv4_address(addr), opts);
 
-  applog.info("shard {} listening on 0.0.0.0:{}", seastar::this_shard_id(),
-              smtp_config->port());
+  applog.info("shard {} listening on {}:{}", seastar::this_shard_id(),
+              smtp_config->host(), smtp_config->port());
   seastar::timer<> timer;
   uint64_t connection_count = 0;
   bool stats = false;
@@ -601,6 +602,7 @@ int main(int argc, char **argv) {
   smtp_config->set_proxy_support(false);
   smtp_config->set_email_limit_size(DEFAULT_EMAIL_SIZE_LIMIT);
   smtp_config->set_session_timeout(DEFAULT_TIMEOUT_SECONDS);
+  smtp_config->set_config_file(DEFAULT_CONFIG_FILE);
 
   namespace po = boost::program_options;
   po::options_description desc("Allowed options");
@@ -629,17 +631,20 @@ int main(int argc, char **argv) {
       "Read real client IP using PROXY protocol v2")
     ("budget",
      po::value<seastar::sstring>()->required()->default_value("auto")->notifier([](const std::string& m) {
-                if (m != "auto" && m != "eco") {
-                    throw po::validation_error(po::validation_error::invalid_option_value,
-                                               "budget", m);
-                }
-            }),
+                 if (m != "auto" && m != "eco") {
+                     throw po::validation_error(po::validation_error::invalid_option_value,
+                                                "budget", m);
+                 }
+             }),
      "Resource budget: [auto | eco]"
      "\nauto - Automatically adapt resource allocation using optimal system configuration."
      "\neco - Use minimal resources for low-tier systems.")
     ("version",
       po::bool_switch()->default_value(false),
-      "Show version and exit");
+      "Show version and exit")
+    ("config",
+      po::value<std::string>()->default_value(smtp_config->config_file()),
+      "Path to configuration file");
   // clang-format on
 
   po::variables_map povm;
@@ -656,6 +661,10 @@ int main(int argc, char **argv) {
       applog.error("program options error: {}", err.what());
       return EXIT_FAILURE;
     }
+  }
+
+  if (!show_help) {
+    smtp_config->from_ini_file(povm["config"].as<std::string>());
   }
 
   seastar::app_template::seastar_options opts;
@@ -675,8 +684,22 @@ int main(int argc, char **argv) {
 
   if (!show_help) {
     try {
-      smtp_config->set_certificate(povm["certificate"].as<std::string>());
-      smtp_config->set_privatekey(povm["privatekey"].as<std::string>());
+      if (!povm["certificate"].defaulted()) {
+        smtp_config->set_certificate(povm["certificate"].as<std::string>());
+      }
+
+      if (!povm["privatekey"].defaulted()) {
+        smtp_config->set_privatekey(povm["privatekey"].as<std::string>());
+      }
+
+      if (!povm["datadir"].defaulted()) {
+        smtp_config->set_data_directory(povm["datadir"].as<std::string>());
+      }
+
+      if (!povm["logdir"].defaulted()) {
+        smtp_config->set_log_directory(povm["logdir"].as<std::string>());
+      }
+
       sstring cwd = std::filesystem::current_path().string();
 
       bool certificate_ok = false;
@@ -800,7 +823,7 @@ int main(int argc, char **argv) {
     try {
       smtp_config->set_data_directory(
           std::string(std::filesystem::weakly_canonical(
-              std::filesystem::path(povm["datadir"].as<std::string>()))));
+              std::filesystem::path(smtp_config->data_directory()))));
 
       std::errc dir_ec =
           file_helpers::checktest_directory(smtp_config->data_directory());
@@ -823,7 +846,7 @@ int main(int argc, char **argv) {
     try {
       smtp_config->set_log_directory(
           std::string(std::filesystem::weakly_canonical(
-              std::filesystem::path(povm["logdir"].as<std::string>()))));
+              std::filesystem::path(smtp_config->log_directory()))));
 
       std::errc dir_ec =
           file_helpers::checktest_directory(smtp_config->log_directory());
@@ -852,15 +875,9 @@ int main(int argc, char **argv) {
       argc, argv,
       [&app, smtp_config_json =
                  std::move(smtp_config_json)]() mutable -> seastar::future<> {
-        auto &cfg = app.configuration();
-
         seastar::lw_shared_ptr<smtp_configuration> smtp_config =
             seastar::make_lw_shared<smtp_configuration>();
         co_await smtp_config->from_json_string(smtp_config_json);
-
-        smtp_config->set_port(cfg["port"].as<uint16_t>());
-        smtp_config->set_session_timeout(cfg["timeout"].as<uint32_t>());
-        smtp_config->set_proxy_support(cfg["proxy-support"].as<bool>());
 
         applog.info("Using smtp domain as: {}", smtp_config->domain());
         applog.info("Email domains accepted: {}",
@@ -883,7 +900,8 @@ int main(int argc, char **argv) {
                            gate.local());
             });
 
-        applog.info("server listening on 0.0.0.0 port {}", smtp_config->port());
+        applog.info("server listening on {} port {}", smtp_config->host(),
+                    smtp_config->port());
         co_await stop_signal->wait();
 
         applog.info("aborting shards...");

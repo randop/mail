@@ -1,5 +1,9 @@
 #include "smtp_configuration.hpp"
 
+#include <boost/property_tree/ini_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <fstream>
+
 smtp_configuration::smtp_configuration() {
   add(&_host, "host", true);
   add(&_port, "port", true);
@@ -13,6 +17,7 @@ smtp_configuration::smtp_configuration() {
   add(&_proxy_support, "proxy_support");
   add(&_email_limit_size, "email_limit_size");
   add(&_session_timeout, "session_timeout");
+  add(&_config, "config");
 }
 
 const std::string &smtp_configuration::host() const { return _host(); }
@@ -49,6 +54,8 @@ uint32_t smtp_configuration::session_timeout() const {
   return _session_timeout();
 }
 
+const std::string &smtp_configuration::config_file() const { return _config(); }
+
 void smtp_configuration::set_host(std::string v) { _host = std::move(v); }
 void smtp_configuration::set_port(uint16_t v) {
   _port = static_cast<uint64_t>(v);
@@ -84,6 +91,8 @@ void smtp_configuration::set_email_limit_size(size_t v) {
 void smtp_configuration::set_session_timeout(uint32_t v) {
   _session_timeout = static_cast<uint64_t>(v);
 }
+
+void smtp_configuration::set_config_file(std::string_view v) { _config = v; }
 
 seastar::sstring smtp_configuration::to_json_string() const {
   return json_base::to_json();
@@ -137,6 +146,10 @@ smtp_configuration::from_json_string(const seastar::sstring &json) {
     _domain = obj["domain"].as_string().c_str();
   }
 
+  if (obj.contains("config")) {
+    _config = obj["config"].as_string().c_str();
+  }
+
   if (obj.contains("all_email_domains")) {
     _all_email_domains = obj["all_email_domains"].as_string().c_str();
   }
@@ -160,6 +173,64 @@ smtp_configuration::from_json_string(const seastar::sstring &json) {
   }
 
   return seastar::make_ready_future<>();
+}
 
-  return seastar::make_ready_future<>();
+void smtp_configuration::from_ini_file(const std::string &path) {
+  namespace pt = boost::property_tree;
+
+  pt::ptree tree;
+  try {
+    std::ifstream file(path);
+    if (!file.good()) {
+      applog.warn("Configuration file not found: {}, using defaults", path);
+      return;
+    }
+    pt::read_ini(file, tree);
+  } catch (const pt::ini_parser_error &e) {
+    applog.error("Failed to parse configuration file {}: {}", path, e.what());
+    throw std::runtime_error(e.what());
+  } catch (const std::exception &e) {
+    applog.error("Error reading configuration file {}: {}", path, e.what());
+    throw;
+  }
+
+  if (auto v = tree.get_optional<std::string>("host")) {
+    _host = *v;
+    applog.info("host = {}", host());
+  }
+  if (auto v = tree.get_optional<uint16_t>("port")) {
+    _port = *v;
+  }
+  if (auto v = tree.get_optional<std::string>("budget")) {
+    if (*v == "eco") {
+      _budget = 1;
+    }
+  }
+  if (auto v = tree.get_optional<std::string>("datadir")) {
+    _data_directory = *v;
+  }
+  if (auto v = tree.get_optional<std::string>("logdir")) {
+    _log_directory = *v;
+  }
+  if (auto v = tree.get_optional<std::string>("certificate")) {
+    _certificate = *v;
+  }
+  if (auto v = tree.get_optional<std::string>("privatekey")) {
+    _privatekey = *v;
+  }
+  if (auto v = tree.get_optional<std::string>("domain")) {
+    _domain = *v;
+  }
+  if (auto v = tree.get_optional<std::string>("all_email_domains")) {
+    _all_email_domains = *v;
+  }
+  if (auto v = tree.get_optional<bool>("proxy_support")) {
+    _proxy_support = *v;
+  }
+  if (auto v = tree.get_optional<size_t>("email_limit_size")) {
+    _email_limit_size = *v;
+  }
+  if (auto v = tree.get_optional<uint32_t>("timeout")) {
+    _session_timeout = *v;
+  }
 }

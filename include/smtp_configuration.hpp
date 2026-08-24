@@ -11,6 +11,7 @@
 
 #include "constants.hpp"
 #include "email_helpers.hpp"
+#include "logger.hpp"
 
 class smtp_configuration final : public seastar::json::json_base {
 public:
@@ -25,6 +26,7 @@ public:
   const std::string &privatekey() const;
   const std::string &domain() const;
   const std::string &all_email_domains() const;
+  const std::string &config_file() const;
   bool proxy_support() const;
   size_t email_limit_size() const;
   uint32_t session_timeout() const;
@@ -41,9 +43,11 @@ public:
   void set_proxy_support(bool v);
   void set_email_limit_size(size_t v);
   void set_session_timeout(uint32_t v);
+  void set_config_file(std::string_view v);
 
   seastar::sstring to_json_string() const;
   seastar::future<> from_json_string(const seastar::sstring &json);
+  void from_ini_file(const std::string &path);
 
 private:
   seastar::json::json_element<std::string> _host;
@@ -55,6 +59,7 @@ private:
   seastar::json::json_element<std::string> _privatekey;
   seastar::json::json_element<std::string> _domain;
   seastar::json::json_element<std::string> _all_email_domains;
+  seastar::json::json_element<std::string> _config;
   seastar::json::json_element<bool> _proxy_support;
   seastar::json::json_element<uint64_t> _email_limit_size;
   seastar::json::json_element<uint64_t> _session_timeout;
