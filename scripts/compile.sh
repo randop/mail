@@ -59,7 +59,7 @@ if detect_ubuntu_jammy; then
   echo "Ubuntu 22.04 LTS (Jammy Jellyfish) detected."
   export CC=gcc-13
   export CXX=g++-13
-  cmake .. -DCMAKE_C_COMPILER=/usr/bin/gcc-13 -DCMAKE_CXX_COMPILER=/usr/bin/g++-13 -DCMAKE_BUILD_TYPE=RelWithDebInfo
+  cmake .. -DCMAKE_C_COMPILER=$(which gcc-13) -DCMAKE_CXX_COMPILER=$(which g++-13) -DCMAKE_BUILD_TYPE=RelWithDebInfo
 else
   cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
 fi
