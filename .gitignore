@@ -88,3 +88,6 @@ smtp*.log
 
 # data directory
 data/
+
+# test configuration
+config.test.conf

@@ -339,9 +339,11 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
                     session_state_mailfrom_count >= 1) {
                   session_state_status = SMTP_SESSION_STATUS::DATA;
                   co_await session->init_emailfile(email_filename);
-                  sstring source_ip =
-                      std::format("X-Mail-Source-IP-Address: {}\r\n", ip);
-                  co_await session->write_data(std::move(source_ip));
+                  if (smtp_config->prepend_header_ip()) {
+                    sstring source_ip =
+                        std::format("X-Mail-Source-IP-Address: {}\r\n", ip);
+                    co_await session->write_data(std::move(source_ip));
+                  }
                   sstring message =
                       "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
                   co_await session->send(std::move(message));
@@ -589,6 +591,7 @@ int main(int argc, char **argv) {
   smtp_config->set_certificate(std::string(DEFAULT_CERTIFICATE_FILE));
   smtp_config->set_privatekey(std::string(DEFAULT_PRIVATEKEY_FILE));
   smtp_config->set_domain(std::string(DEFAULT_SMTP_DOMAIN));
+  smtp_config->set_prepend_header_ip(DEFAULT_PREPEND_HEADER_IP);
 
   // scoped
   {

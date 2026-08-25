@@ -29,6 +29,7 @@ constexpr const char DEFAULT_PRIVATEKEY_FILE_RAW[] =
 constexpr std::string_view DEFAULT_PRIVATEKEY_FILE{DEFAULT_PRIVATEKEY_FILE_RAW};
 constexpr const char DEFAULT_CONFIG_FILE_RAW[] = "/etc/mail/smtp.conf";
 constexpr std::string_view DEFAULT_CONFIG_FILE{DEFAULT_CONFIG_FILE_RAW};
+constexpr const bool DEFAULT_PREPEND_HEADER_IP = true;
 
 constexpr const char SMTP_CRLF_RAW[] = "\r\n";
 constexpr std::string_view SMTP_CRLF{SMTP_CRLF_RAW, 2};

@@ -18,6 +18,7 @@ smtp_configuration::smtp_configuration() {
   add(&_email_limit_size, "email_limit_size");
   add(&_session_timeout, "session_timeout");
   add(&_config, "config");
+  add(&_prepend_header_ip, "prepend_header_ip");
 }
 
 const std::string &smtp_configuration::host() const { return _host(); }
@@ -55,6 +56,9 @@ uint32_t smtp_configuration::session_timeout() const {
 }
 
 const std::string &smtp_configuration::config_file() const { return _config(); }
+bool smtp_configuration::prepend_header_ip() const {
+  return _prepend_header_ip();
+}
 
 void smtp_configuration::set_host(std::string v) { _host = std::move(v); }
 void smtp_configuration::set_port(uint16_t v) {
@@ -93,6 +97,10 @@ void smtp_configuration::set_session_timeout(uint32_t v) {
 }
 
 void smtp_configuration::set_config_file(std::string_view v) { _config = v; }
+
+void smtp_configuration::set_prepend_header_ip(bool v) {
+  _prepend_header_ip = v;
+}
 
 seastar::sstring smtp_configuration::to_json_string() const {
   return json_base::to_json();
@@ -154,6 +162,7 @@ smtp_configuration::from_json_string(const seastar::sstring &json) {
     _all_email_domains = obj["all_email_domains"].as_string().c_str();
   }
 
+  _proxy_support = false;
   if (obj.contains("proxy_support")) {
     _proxy_support = obj["proxy_support"].as_bool();
   }
@@ -170,6 +179,11 @@ smtp_configuration::from_json_string(const seastar::sstring &json) {
         static_cast<uint64_t>(obj["session_timeout"].to_number<int64_t>());
   } else {
     _session_timeout = DEFAULT_TIMEOUT_SECONDS;
+  }
+
+  _prepend_header_ip = false;
+  if (obj.contains("prepend_header_ip")) {
+    _prepend_header_ip = obj["prepend_header_ip"].as_bool();
   }
 
   return seastar::make_ready_future<>();
@@ -232,5 +246,8 @@ void smtp_configuration::from_ini_file(const std::string &path) {
   }
   if (auto v = tree.get_optional<uint32_t>("timeout")) {
     _session_timeout = *v;
+  }
+  if (auto v = tree.get_optional<bool>("prepend_header_ip")) {
+    _prepend_header_ip = *v;
   }
 }
