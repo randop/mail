@@ -139,7 +139,6 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
   constexpr size_t fixed_stream_capacity = 16;
   std::vector<char> fixed_stream(fixed_stream_capacity, '\0');
   size_t fixed_stream_size = 0;
-  size_t session_state_command_index = 0;
 
   SMTP_COMMAND session_state_cmd{SMTP_COMMAND::UNKNOWN};
 
@@ -149,6 +148,8 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
   size_t session_state_mailfrom_count = 0;
 
   bool session_state_proxy_header_read = false;
+
+  std::vector<seastar::sstring> session_mail_rcpt;
 
   try {
     co_await session->init_logfile(log_filename);
@@ -197,15 +198,12 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
                                       command_stream.size()};
 
       if (session_state_status == SMTP_SESSION_STATUS::COMMAND) {
-        session_state_command_index = 0;
-
         seastar::sstring line(command_stream.get(), command_stream.size());
 
         for (const auto &[cmd, smtp_cmd] : SMTP_RFC_COMMANDS) {
           std::string_view chunk_view = {line.data(), cmd.size()};
           if (string_helpers::compare_string_views(chunk_view, cmd)) {
             session_state_cmd = smtp_cmd;
-            session_state_command_index += cmd.size();
             break;
           }
         }
@@ -312,20 +310,27 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
                 if (ec == std::errc()) {
                   sstring message = "250 Accepted\r\n";
                   co_await session->send(std::move(message));
+                  bool is_email_matched = false;
                   std::string_view check_email =
                       email_helpers::get_domain(email);
                   if (all_email_domains.count == 1 &&
                       compare_string_views(check_email,
                                            smtp_config->domain())) {
                     session_state_rcpt_count++;
+                    is_email_matched = true;
                   } else {
                     for (size_t i = 0; i < all_email_domains.count; i++) {
                       if (compare_string_views(check_email,
                                                all_email_domains.domains[i])) {
                         session_state_rcpt_count++;
+                        is_email_matched = true;
                         break;
                       }
                     }
+                  }
+
+                  if (is_email_matched) {
+                    session_mail_rcpt.emplace_back(std::move(email));
                   }
                 } else {
                   sstring message = "553 5.1.3 Bad email address syntax\r\n";
@@ -344,6 +349,17 @@ handle_connection(seastar::connected_socket cs, seastar::socket_address remote,
                         std::format("X-Mail-Source-IP-Address: {}\r\n", ip);
                     co_await session->write_data(std::move(source_ip));
                   }
+
+                  if (smtp_config->prepend_header_rcpt() &&
+                      !session_mail_rcpt.empty()) {
+                    for (size_t i = 0; i < session_mail_rcpt.size(); ++i) {
+                      seastar::sstring header_rcpt =
+                          std::format("X-Mail-Rcpt-Email-Address: {}\r\n",
+                                      session_mail_rcpt[i].c_str());
+                      co_await session->write_data(std::move(header_rcpt));
+                    }
+                  }
+
                   sstring message =
                       "354 Start mail input; end with <CR><LF>.<CR><LF>\r\n";
                   co_await session->send(std::move(message));
@@ -592,6 +608,7 @@ int main(int argc, char **argv) {
   smtp_config->set_privatekey(std::string(DEFAULT_PRIVATEKEY_FILE));
   smtp_config->set_domain(std::string(DEFAULT_SMTP_DOMAIN));
   smtp_config->set_prepend_header_ip(DEFAULT_PREPEND_HEADER_IP);
+  smtp_config->set_prepend_header_rcpt(DEFAULT_PREPEND_HEADER_RCPT);
 
   // scoped
   {

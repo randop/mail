@@ -31,6 +31,7 @@ public:
   size_t email_limit_size() const;
   uint32_t session_timeout() const;
   bool prepend_header_ip() const;
+  bool prepend_header_rcpt() const;
 
   void set_host(std::string v);
   void set_port(uint16_t v);
@@ -46,6 +47,7 @@ public:
   void set_session_timeout(uint32_t v);
   void set_config_file(std::string_view v);
   void set_prepend_header_ip(bool v);
+  void set_prepend_header_rcpt(bool v);
 
   seastar::sstring to_json_string() const;
   seastar::future<> from_json_string(const seastar::sstring &json);
@@ -66,4 +68,5 @@ private:
   seastar::json::json_element<uint64_t> _email_limit_size;
   seastar::json::json_element<uint64_t> _session_timeout;
   seastar::json::json_element<bool> _prepend_header_ip;
+  seastar::json::json_element<bool> _prepend_header_rcpt;
 };
